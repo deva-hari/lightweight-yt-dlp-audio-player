@@ -66,6 +66,25 @@
 - If you get errors, check `yt_audio_player.log` (if logging is enabled) for full debug info.
 - You can change the number of search results by editing `SEARCH_RESULTS` in the script.
 - Works great in a terminal multiplexer or as a background music tool while you work or play!
+- If you don't want the hassle of keeping this script, you can directly start the player by executing the following commands:
+
+### ▶️ Search and play the first result
+
+```sh
+yt-dlp -f bestaudio -o - "ytsearch1:lofi hip hop" | ffplay -i - -nodisp -autoexit
+```
+
+### ▶️ Stream a single YouTube video (replace the URL with your video)
+
+```sh
+yt-dlp -f bestaudio -o - "https://www.youtube.com/watch?v=YOUR_VIDEO_ID" | ffplay -i - -nodisp -autoexit
+```
+
+### 🎶 Stream a YouTube playlist (replace the URL with your playlist)
+
+```sh
+yt-dlp -f bestaudio -o - "https://www.youtube.com/playlist?list=YOUR_PLAYLIST_ID" | ffplay -i - -nodisp -autoexit
+```
 
 ## 🦾 Contributing
 
