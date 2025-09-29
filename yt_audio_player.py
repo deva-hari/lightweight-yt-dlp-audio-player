@@ -241,6 +241,65 @@ def play_audio(video_id, cookies=None):
         return "break"
 
 
+# ========== DEPENDENCY CHECK & AUTO-INSTALL ==========
+def check_and_install_dependencies():
+    import shutil
+    import platform
+
+    # Check yt-dlp
+    yt_dlp_path = shutil.which(YT_DLP)
+    if not yt_dlp_path:
+        print("[INFO] yt-dlp not found. Attempting to install via pip...")
+        log("[INFO] yt-dlp not found. Attempting to install via pip...")
+        try:
+            subprocess.check_call(
+                [sys.executable, "-m", "pip", "install", "-U", "yt-dlp"]
+            )
+            print("[INFO] yt-dlp installed successfully.")
+            log("[INFO] yt-dlp installed successfully.")
+        except Exception as e:
+            print(f"[ERROR] Failed to install yt-dlp: {e}")
+            log(f"[ERROR] Failed to install yt-dlp: {e}")
+            sys.exit(1)
+    # Check ffplay
+    ffplay_path = shutil.which(FFPLAY)
+    if not ffplay_path:
+        print(
+            "[ERROR] ffplay not found in PATH. Attempting to install FFmpeg using winget..."
+        )
+        log(
+            "[ERROR] ffplay not found in PATH. Attempting to install FFmpeg using winget..."
+        )
+        if platform.system() == "Windows":
+            try:
+                subprocess.check_call(
+                    ["winget", "install", "-e", "--id", "Gyan.FFmpeg"], shell=True
+                )
+                print(
+                    "[INFO] FFmpeg installation attempted. Please restart your terminal or add ffplay to PATH if needed."
+                )
+                log("[INFO] FFmpeg installation attempted via winget.")
+            except Exception as e:
+                print(f"[ERROR] Failed to install FFmpeg using winget: {e}")
+                log(f"[ERROR] Failed to install FFmpeg using winget: {e}")
+            # Re-check ffplay after attempted install
+            ffplay_path = shutil.which(FFPLAY)
+            if not ffplay_path:
+                print(
+                    "[ERROR] ffplay still not found in PATH. Please install FFmpeg from https://ffmpeg.org/download.html and add ffplay to your PATH."
+                )
+                log("[ERROR] ffplay still not found in PATH after winget attempt.")
+                sys.exit(1)
+        else:
+            print(
+                "[ERROR] ffplay not found in PATH. Please install FFmpeg and add ffplay to your PATH."
+            )
+            log(
+                "[ERROR] ffplay not found in PATH. Please install FFmpeg and add ffplay to your PATH."
+            )
+            sys.exit(1)
+
+
 # ========== MAIN LOOP ==========
 def main():
     cookies = COOKIES_FILE if has_cookies() else None
@@ -320,4 +379,5 @@ def main():
 
 
 if __name__ == "__main__":
+    check_and_install_dependencies()
     main()
