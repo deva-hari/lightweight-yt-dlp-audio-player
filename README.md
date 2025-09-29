@@ -96,4 +96,4 @@ Pull requests, issues, and feature ideas are welcome! This project is designed t
 
 ---
 
-*Made with ❤️ for music lovers, productivity nerds, and anyone who hates bloatware.*
+*Made with ❤️ and 🤖 for music lovers, productivity nerds, and anyone who hates bloatware.*
