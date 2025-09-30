@@ -53,12 +53,47 @@ Are you a gamer who wants to blast your favorite YouTube playlist while fragging
 
 7. **Marvel at how little RAM and CPU you’re using.**
 
-## 🎹 Usage (Unleash the Power)
+## 🎹 Usage Examples
 
-- **Search:** Type a search query, see results, pick a number, and listen!
-- **Playlist:** Paste a playlist link, play all tracks, skip with `n`, exit with `Ctrl+C`.
-- **Direct Link:** Paste a YouTube video link, and it streams instantly.
-- **Debugging:** Set `LOG_ENABLED = True` in the script for detailed logs in `yt_audio_player.log`.
+### Search and pick interactively
+
+```sh
+python yt_audio_player.py
+YouTube> lo-fi beats
+```
+
+### Play a single video
+
+```sh
+python yt_audio_player.py "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+```
+
+### Play an entire playlist
+
+```sh
+python yt_audio_player.py "https://www.youtube.com/playlist?list=PLrAXtmErZgOeiKm4sgNOknGvNjby9efdf"
+```
+
+### Debug mode (verbose logs + ffplay output)
+
+```sh
+python yt_audio_player.py --debug "chill vibes"
+```
+
+#### Controls
+
+- **Playlist:** `[n]ext`, `[r]eplay`, `[q]uit`
+- **Single video:** `[q]uit`
+
+#### Configuration
+
+- The number of search results is set by `SearchLimit` in `config.json` (default: 10).
+- Log file: `logs/player.log`
+- Place `cookies.txt` in the folder for restricted content support.
+
+#### Dependencies
+
+- The script will auto-install `yt-dlp` and `ffmpeg` if missing (Windows: via winget, Linux: via apt/pip).
 
 ## 🧠 Why is this the best? (Let’s Get Real)
 

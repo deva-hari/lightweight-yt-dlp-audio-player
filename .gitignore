@@ -2,3 +2,4 @@ cookies.txt
 yt_audio_player.log
 __pycache__/
 *.pyc
+/logs/
