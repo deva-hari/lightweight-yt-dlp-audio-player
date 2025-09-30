@@ -13,7 +13,7 @@ Are you a gamer who wants to blast your favorite YouTube playlist while fragging
 
 ## ✨ Features That Will Make You Question Reality
 
-- **Blazing Fast Search:** Type a query, get the top 10 results with titles, channels, and durations before you can say "yt-dlp"!
+- **Blazing Fast Search:** Type a query, get the top 10 results with titles, channels, and durations before you can say "yt-dlp"! (Not Really!😉)
 - **Playlist Power:** Paste a playlist link and play every track, skipping with a single keypress. See what’s playing, always! (Your friends will think you’re a wizard.)
 - **Direct Link Streaming:** Paste any YouTube link and it just works. No questions asked. No judgment.
 - **Interactive Selection:** Pick your favorite from search results—no more guessing! (No more "wrong song" disasters.)
