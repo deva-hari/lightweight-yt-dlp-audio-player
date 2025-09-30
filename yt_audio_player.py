@@ -182,6 +182,8 @@ def ydl_opts(cfg: dict, audio_only=True) -> dict:
     if Path(cookies).exists():
         opts["cookiefile"] = cookies
         logging.debug("Using cookies file: %s", cookies)
+    else:
+        logging.debug("Cookies file not found, using defaults.")
     logging.debug("yt-dlp options: %s", opts)
     return opts
 
@@ -220,22 +222,45 @@ def extract_stream_url(video_url: str) -> Optional[str]:
 # Playback
 # ------------------------------------------------------------------
 def play_stream(url: str, silent=True) -> subprocess.Popen:
-    logging.debug("play_stream called with url=%s, silent=%s", url, silent)
-    cmd = [
+    """
+    Pipe yt-dlp output directly to ffplay, matching the command-line example.
+    url: can be a search string, video URL, or playlist URL.
+    """
+    logging.debug("play_stream (pipe) called with url=%s, silent=%s", url, silent)
+    ytdlp_cmd = [
+        "yt-dlp",
+        "-f",
+        "bestaudio",
+        "-o",
+        "-",
+        url,
+    ]
+    cfg = load_config()
+    cookies = cfg.get("CookiesFile", COOKIES_FILE)
+    if Path(cookies).exists():
+        ytdlp_cmd += ["--cookies", cookies]
+    ffplay_cmd = [
         "ffplay",
+        "-i",
+        "-",
         "-nodisp",
         "-autoexit",
         "-loglevel",
-        "quiet" if silent else "info",
-        url,
+        "info" if not silent else "quiet",
     ]
-    logging.debug("ffplay cmd: %s", " ".join(cmd))
+    logging.debug("yt-dlp cmd: %s", " ".join(ytdlp_cmd))
+    logging.debug("ffplay cmd: %s", " ".join(ffplay_cmd))
     try:
-        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
-        logging.debug("ffplay process started, pid=%s", proc.pid)
-        return proc
+        ytdlp_proc = subprocess.Popen(
+            ytdlp_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+        )
+        ffplay_proc = subprocess.Popen(
+            ffplay_cmd, stdin=ytdlp_proc.stdout, stdout=subprocess.DEVNULL, stderr=None
+        )
+        logging.debug("yt-dlp pid=%s, ffplay pid=%s", ytdlp_proc.pid, ffplay_proc.pid)
+        return ffplay_proc
     except Exception as e:
-        logging.error("Failed to start ffplay: %s", e)
+        logging.error("Failed to start yt-dlp|ffplay pipeline: %s", e)
         return None
 
 
@@ -250,76 +275,117 @@ def interactive_play(entries: List[dict], cfg: dict):
         webpage_url = e.get("webpage_url") or e.get("url")
         logging.debug("Now playing entry: %s, url: %s", title, webpage_url)
         print(f"\nNow playing: [{idx+1}/{len(entries)}] {title}")
-        stream_url = None
-        for attempt in range(retry):
-            logging.debug("Extracting stream url, attempt %d", attempt + 1)
-            stream_url = extract_stream_url(webpage_url)
-            if stream_url:
+        retry_count = 0
+        while retry_count < 3:
+            player = play_stream(webpage_url, silent=not cfg.get("Debug", False))
+            if player is None:
+                print("  Failed to start player.")
+                idx += 1
                 break
-            logging.warning("Retrying extraction … (%d/%d)", attempt + 1, retry)
-        if not stream_url:
-            logging.error("Could not extract stream URL for entry: %s", title)
-            print("  Skipped – could not extract stream URL.")
-            idx += 1
-            continue
+            print("  Controls: [n]ext, [r]eplay, [q]uit")
+            logging.debug("Player started for entry: %s", title)
+            user_action = None
+            try:
+                while player.poll() is None:
+                    if platform.system() == "Windows":
+                        import msvcrt
 
-        player = play_stream(stream_url, silent=not cfg.get("Debug", False))
-        if player is None:
-            print("  Failed to start player.")
-            idx += 1
-            continue
-        print("  Controls: [n]ext, [r]eplay, [q]uit")
-        logging.debug("Player started for entry: %s", title)
-        try:
-            while player.poll() is None:
-                if platform.system() == "Windows":
-                    import msvcrt
+                        if msvcrt.kbhit():
+                            ch = msvcrt.getch().decode().lower()
+                            logging.debug("User pressed key: %s", ch)
+                            if ch == "n":
+                                logging.debug("User requested next track.")
+                                player.terminate()
+                                user_action = "next"
+                                break
+                            elif ch == "r":
+                                logging.debug("User requested replay.")
+                                player.terminate()
+                                user_action = "replay"
+                                break
+                            elif ch == "q":
+                                logging.debug("User requested quit.")
+                                player.terminate()
+                                return
+                    else:
+                        import select
 
-                    if msvcrt.kbhit():
-                        ch = msvcrt.getch().decode().lower()
-                        logging.debug("User pressed key: %s", ch)
-                        if ch == "n":
-                            logging.debug("User requested next track.")
-                            player.terminate()
-                            idx += 1
-                            break
-                        elif ch == "r":
-                            logging.debug("User requested replay.")
-                            player.terminate()
-                            break
-                        elif ch == "q":
-                            logging.debug("User requested quit.")
-                            player.terminate()
-                            return
-                else:
-                    # POSIX – non-blocking stdin
-                    import select
+                        if select.select([sys.stdin], [], [], 0)[0]:
+                            ch = sys.stdin.read(1).lower()
+                            logging.debug("User pressed key: %s", ch)
+                            if ch == "n":
+                                logging.debug("User requested next track.")
+                                player.terminate()
+                                user_action = "next"
+                                break
+                            elif ch == "r":
+                                logging.debug("User requested replay.")
+                                player.terminate()
+                                user_action = "replay"
+                                break
+                            elif ch == "q":
+                                logging.debug("User requested quit.")
+                                player.terminate()
+                                return
+                    time.sleep(0.2)
+            except KeyboardInterrupt:
+                logging.debug("KeyboardInterrupt: terminating player.")
+                player.terminate()
+                return
+            exit_code = player.wait()
+            logging.debug("ffplay exited with code: %s", exit_code)
+            # If abnormal exit, retry up to 2 more times
+            if exit_code != 0 and user_action is None:
+                retry_count += 1
+                print(
+                    f"  ffplay exited abnormally (code {exit_code}), retrying ({retry_count}/3)..."
+                )
+                logging.warning(
+                    "ffplay exited abnormally (code %s), retrying (%d/3)...",
+                    exit_code,
+                    retry_count,
+                )
+                continue
+            # If user requested replay, loop again
+            if user_action == "replay":
+                retry_count = 0
+                continue
+            # If user requested next, advance
+            if user_action == "next":
+                idx += 1
+                break
+            # If track ended naturally, prompt user for 3 seconds
+            print("Track ended. [n]ext, [r]eplay, [q]uit? (auto-next in 3s)")
+            logging.debug("Track ended, waiting for user action (3s timeout).")
+            import threading
 
-                    if select.select([sys.stdin], [], [], 0)[0]:
-                        ch = sys.stdin.read(1).lower()
-                        logging.debug("User pressed key: %s", ch)
-                        if ch == "n":
-                            logging.debug("User requested next track.")
-                            player.terminate()
-                            idx += 1
-                            break
-                        elif ch == "r":
-                            logging.debug("User requested replay.")
-                            player.terminate()
-                            break
-                        elif ch == "q":
-                            logging.debug("User requested quit.")
-                            player.terminate()
-                            return
-                time.sleep(0.2)
-        except KeyboardInterrupt:
-            logging.debug("KeyboardInterrupt: terminating player.")
-            player.terminate()
-            return
-        else:
-            # natural end – advance
-            logging.debug("Track ended naturally, advancing.")
-            idx += 1
+            user_input = {"ch": None}
+
+            def get_input():
+                user_input["ch"] = input().strip().lower()
+
+            t = threading.Thread(target=get_input)
+            t.daemon = True
+            t.start()
+            t.join(3)
+            ch = user_input["ch"]
+            if ch is None:
+                print("No input, auto-advancing to next track.")
+                idx += 1
+                break
+            if ch == "n":
+                idx += 1
+                break
+            elif ch == "r":
+                retry_count = 0
+                continue
+            elif ch == "q":
+                return
+            else:
+                print("Invalid input. [n]ext, [r]eplay, [q]uit?")
+                # fallback: auto-advance
+                idx += 1
+                break
     print("End of playlist.")
 
 
@@ -354,16 +420,15 @@ def handle_input(raw: str, cfg: dict):
                 print("Empty or unavailable playlist.")
         else:
             logging.debug("URL detected as single video.")
-            # single video: extract and play directly
-            stream_url = extract_stream_url(raw)
-            if stream_url:
-                logging.debug("Stream URL extracted: %s", stream_url)
-                print("Now playing: [1/1] (single video)")
-                player = play_stream(stream_url, silent=not cfg.get("Debug", False))
-                print("  Controls: [q]uit")
+            # single video: stream directly using yt-dlp | ffplay pipe
+            print("Now playing: [1/1] (single video)")
+            while True:
+                player = play_stream(raw, silent=not cfg.get("Debug", False))
+                print("  Controls: [r]eplay, [q]uit")
                 if player is None:
                     print("  Failed to start player.")
                     return
+                user_action = None
                 try:
                     while player.poll() is None:
                         if platform.system() == "Windows":
@@ -372,7 +437,12 @@ def handle_input(raw: str, cfg: dict):
                             if msvcrt.kbhit():
                                 ch = msvcrt.getch().decode().lower()
                                 logging.debug("User pressed key: %s", ch)
-                                if ch == "q":
+                                if ch == "r":
+                                    logging.debug("User requested replay.")
+                                    player.terminate()
+                                    user_action = "replay"
+                                    break
+                                elif ch == "q":
                                     logging.debug("User requested quit.")
                                     player.terminate()
                                     return
@@ -382,7 +452,12 @@ def handle_input(raw: str, cfg: dict):
                             if select.select([sys.stdin], [], [], 0)[0]:
                                 ch = sys.stdin.read(1).lower()
                                 logging.debug("User pressed key: %s", ch)
-                                if ch == "q":
+                                if ch == "r":
+                                    logging.debug("User requested replay.")
+                                    player.terminate()
+                                    user_action = "replay"
+                                    break
+                                elif ch == "q":
                                     logging.debug("User requested quit.")
                                     player.terminate()
                                     return
@@ -391,9 +466,24 @@ def handle_input(raw: str, cfg: dict):
                     logging.debug("KeyboardInterrupt: terminating player.")
                     player.terminate()
                     return
-            else:
-                logging.debug("Could not extract video info for URL: %s", raw)
-                print("Could not extract video info.")
+                # If user requested replay, loop again
+                if user_action == "replay":
+                    continue
+                # If track ended naturally, prompt user
+                print("Track ended. [r]eplay, [q]uit?")
+                logging.debug("Track ended, waiting for user action.")
+                while True:
+                    ch = input().strip().lower()
+                    if ch == "r":
+                        break
+                    elif ch == "q":
+                        return
+                    else:
+                        print("Invalid input. [r]eplay, [q]uit?")
+                if ch == "r":
+                    continue
+                else:
+                    break
     else:
         logging.debug("Input detected as search query.")
         # treat as search
