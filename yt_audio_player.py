@@ -413,8 +413,8 @@ def handle_input(raw: str, cfg: dict):
             entries = playlist_to_entries(raw)
             if entries:
                 logging.debug("Playlist has %d entries.", len(entries))
-                # Always play playlist quietly
-                interactive_play(entries, {**cfg, "Debug": False})
+                # Use current debug setting for playlist playback
+                interactive_play(entries, cfg)
             else:
                 logging.debug("Playlist empty or unavailable.")
                 print("Empty or unavailable playlist.")
