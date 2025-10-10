@@ -85,6 +85,69 @@ python yt_audio_player.py --debug "chill vibes"
 - **Playlist:** `[n]ext`, `[r]eplay`, `[q]uit`
 - **Single video:** `[q]uit`
 
+### Interactive commands & features (detailed)
+
+While running the script in interactive mode (`python yt_audio_player.py`) you can use the following commands and features:
+
+- Playback controls:
+  - `n` / `r` / `q` during playback
+  - Playlist: press `n` to skip to the next track, `r` to replay the current track, or `q` to return to the main menu.
+  - Single video: press `r` to replay or `q` to quit playback.
+
+- `history` (hidden interactive command): opens the paginated history viewer
+  - Defaults: 10 entries per page, numbered 0–9 on each page.
+  - Display fields: serial (0–9), type, date/time, truncated title, URL, persistent play count.
+
+- History viewer commands
+  - `n` / `p` — next / previous page
+  - `v<num>` — view raw JSON for the entry at index `<num>` on the page (e.g. `v3`)
+  - `f type=<type>` — filter by entry type (e.g. `f type=single`, `f type=playlist_entry`)
+  - `s <term>` — search/filter by title substring (case-insensitive)
+  - `export csv` / `export json` — export the currently filtered list to `logs/history_export.csv` or `logs/history_export.json`
+  - `clear` — delete all history (prompted confirmation required; type `YES` to proceed)
+  - `help` — show the viewer commands
+
+- What is stored in history
+  - Each history entry is a JSON object with fields including: `type` (single|playlist_entry), `track_url`, `playlist_url` (when applicable), `title`, `timestamp` (unix epoch), and `play_count` (persistent counter incremented per-track URL).
+  - Files: `logs/history.json` (entries) and `logs/history_index.json` (persistent play count index).
+
+### Playback behavior
+
+- Piped streaming
+  - The player streams audio by piping `yt-dlp` output directly into `ffplay`, matching this command-line pattern:
+
+      ```sh
+      yt-dlp -f bestaudio -o - "<query-or-url>" | ffplay -i - -nodisp -autoexit
+      ```
+
+- Elapsed / total time display
+  - While a track is playing the script displays elapsed seconds in the terminal and, when available, the track's total duration (queried via `yt-dlp` metadata).
+  - When running with `--debug`, ffplay and debug logs are shown and may interleave with the elapsed-time line.
+
+### Debugging and logs
+
+- Run with `--debug` to enable verbose logging (to console and `logs/player.log`) and to allow ffplay output to appear for troubleshooting:
+
+```sh
+python yt_audio_player.py --debug "chill vibes"
+```
+
+- Log locations
+  - Player log: `logs/player.log`
+  - History entries: `logs/history.json`
+  - History index (play counts): `logs/history_index.json`
+  - History exports: `logs/history_export.csv` / `logs/history_export.json`
+
+### Files & configuration
+
+- `config.json` — small config file (SearchLimit, Debug, CookiesFile). Defaults are created automatically when missing.
+- `cookies.txt` — optional cookies file you can drop into the script folder for age/region-restricted content.
+
+### Exporting & clearing history
+
+- Export: from the history viewer use `export csv` or `export json` to write the currently filtered entries to `logs/history_export.csv` or `logs/history_export.json`.
+- Clear: `clear` in the history viewer wipes `logs/history.json` and `logs/history_index.json` after typing `YES` to confirm.
+
 #### Configuration
 
 - The number of search results is set by `SearchLimit` in `config.json` (default: 10).
