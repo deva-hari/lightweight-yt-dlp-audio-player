@@ -24,6 +24,8 @@ except ImportError:
 CONFIG_FILE = "config.json"
 LOG_FILE = "logs/player.log"
 COOKIES_FILE = "cookies.txt"
+HISTORY_FILE = "logs/history.json"
+HISTORY_INDEX_FILE = "logs/history_index.json"
 
 
 # ------------------------------------------------------------------
@@ -188,6 +190,238 @@ def ydl_opts(cfg: dict, audio_only=True) -> dict:
     return opts
 
 
+# ------------------------------------------------------------------
+# History (simple JSON log)
+# ------------------------------------------------------------------
+def init_history():
+    Path("logs").mkdir(exist_ok=True)
+    if not Path(HISTORY_FILE).exists():
+        with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+            json.dump([], f)
+    # ensure index file exists
+    if not Path(HISTORY_INDEX_FILE).exists():
+        with open(HISTORY_INDEX_FILE, "w", encoding="utf-8") as f:
+            json.dump({}, f)
+
+
+def load_history() -> List[dict]:
+    init_history()
+    try:
+        with open(HISTORY_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+
+def _load_index() -> dict:
+    init_history()
+    try:
+        with open(HISTORY_INDEX_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_index(idx: dict):
+    try:
+        with open(HISTORY_INDEX_FILE, "w", encoding="utf-8") as f:
+            json.dump(idx, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logging.debug("Could not write history index: %s", e)
+
+
+def append_history(entry: dict):
+    # update persistent play count index and attach play_count to entry
+    idx = _load_index()
+    key = entry.get("track_url") or entry.get("playlist_url") or ""
+    count = idx.get(key, 0) + 1
+    idx[key] = count
+    entry["play_count"] = count
+    _save_index(idx)
+
+    h = load_history()
+    h.append(entry)
+    try:
+        with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+            json.dump(h, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logging.debug("Could not write history: %s", e)
+
+
+def _format_date(ts: Optional[int]) -> str:
+    if not ts:
+        return "-"
+    try:
+        return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
+    except Exception:
+        return str(ts)
+
+
+def show_history_paged(page_size: int = 10):
+    h = load_history()
+    if not h:
+        print("No history entries.")
+        return
+    # use persistent play_count if present
+
+    def _truncate(s: str, w: int) -> str:
+        s = s or ""
+        if len(s) <= w:
+            return s
+        return s[: w - 1] + "…"
+
+    filtered = h
+    total_pages = (len(filtered) + page_size - 1) // page_size if filtered else 1
+    page = 0
+    # active filters
+    active_type = None
+    active_search = None
+    while True:
+        start = page * page_size
+        end = start + page_size
+        # re-evaluate filtered list
+        filtered = h
+        if active_type:
+            filtered = [x for x in filtered if (x.get("type") or "") == active_type]
+        if active_search:
+            filtered = [
+                x
+                for x in filtered
+                if active_search.lower() in (x.get("title") or "").lower()
+            ]
+        total_pages = (len(filtered) + page_size - 1) // page_size if filtered else 1
+        start = page * page_size
+        end = start + page_size
+        slice_ = filtered[start:end]
+        print(
+            f"History — page {page+1}/{total_pages} (entries {start+1}-{min(end,len(filtered))} of {len(filtered)})"
+        )
+        print(
+            "Idx Type         Date                 Title                                 URL                                               Plays"
+        )
+        print(
+            "--- -------------- -------------------- ------------------------------------ ---------------------------------------- -----"
+        )
+        for i, item in enumerate(slice_):
+            idx = i % 10  # 0-9 per page
+            t = (item.get("type") or "?")[:14]
+            date = _format_date(item.get("timestamp"))
+            title = _truncate(item.get("title") or "", 36)
+            url = _truncate(item.get("track_url") or item.get("playlist_url") or "", 40)
+            plays = item.get("play_count") or 1
+            print(f"[{idx}] {t:14} {date:20} {title:36} {url:40} {plays:5}")
+        print(
+            "\nCommands: n=next, p=prev, q=quit, v<num>=view raw (v3), f type=<single|playlist|playlist_entry|...>, s <term>=search title, export [csv|json], clear, help"
+        )
+        cmd = input("history> ").strip().lower()
+        if cmd == "n":
+            if page + 1 < total_pages:
+                page += 1
+            else:
+                print("Already last page.")
+        elif cmd == "p":
+            if page > 0:
+                page -= 1
+            else:
+                print("Already first page.")
+        elif cmd == "q":
+            break
+        elif cmd.startswith("v"):
+            try:
+                n = int(cmd[1:])
+                if 0 <= n < len(slice_):
+                    print(json.dumps(slice_[n], ensure_ascii=False, indent=2))
+                else:
+                    print("Invalid index on page.")
+            except Exception:
+                print("Invalid v command. Use v0..v9")
+        elif cmd.startswith("f"):
+            # filter by type, syntax: f type=single
+            parts = cmd.split()
+            if len(parts) >= 2 and "=" in parts[1]:
+                k, v = parts[1].split("=", 1)
+                if k == "type":
+                    active_type = v
+                    page = 0
+                else:
+                    print("Unknown filter key.")
+            else:
+                print("Filter syntax: f type=single")
+        elif cmd.startswith("s "):
+            # search by title
+            term = cmd[2:].strip()
+            if term:
+                active_search = term
+                page = 0
+            else:
+                active_search = None
+                print("Search cleared.")
+        elif cmd.startswith("export"):
+            parts = cmd.split()
+            fmt = "csv" if len(parts) == 1 else parts[1]
+            try:
+                if fmt == "csv":
+                    _export_history_csv(filtered)
+                else:
+                    _export_history_json(filtered)
+                print(f"Exported history as {fmt}.")
+            except Exception as e:
+                print("Export failed:", e)
+        elif cmd == "clear":
+            confirm = input("Clear all history? Type YES to confirm: ")
+            if confirm == "YES":
+                try:
+                    with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+                        json.dump([], f)
+                    _save_index({})
+                    h = []
+                    filtered = []
+                    page = 0
+                    print("History cleared.")
+                except Exception as e:
+                    print("Failed to clear:", e)
+            else:
+                print("Clear cancelled.")
+        elif cmd == "help":
+            print(
+                "Commands: n, p, q, v<num>, f type=<type>, s <term>, export [csv|json], clear, help"
+            )
+        else:
+            print("Unknown command.")
+
+
+def _export_history_json(items: List[dict], path: str = "logs/history_export.json"):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(items, f, ensure_ascii=False, indent=2)
+
+
+def _export_history_csv(items: List[dict], path: str = "logs/history_export.csv"):
+    import csv
+
+    keys = ["timestamp", "type", "title", "track_url", "playlist_url", "play_count"]
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=keys)
+        w.writeheader()
+        for it in items:
+            row = {k: it.get(k) for k in keys}
+            w.writerow(row)
+
+
+# ------------------------------------------------------------------
+# Metadata helpers
+# ------------------------------------------------------------------
+def get_video_info(url: str) -> Optional[dict]:
+    cfg = load_config()
+    try:
+        with yt_dlp.YoutubeDL({**ydl_opts(cfg)}) as ydl:
+            info = ydl.extract_info(url, download=False)
+            logging.debug("get_video_info: %s", info)
+            return info
+    except Exception as e:
+        logging.debug("get_video_info failed: %s", e)
+        return None
+
+
 def search_yt(query: str, limit: int) -> List[dict]:
     cfg = load_config()
     logging.debug("search_yt called with query='%s', limit=%d", query, limit)
@@ -264,7 +498,9 @@ def play_stream(url: str, silent=True) -> subprocess.Popen:
         return None
 
 
-def interactive_play(entries: List[dict], cfg: dict):
+def interactive_play(
+    entries: List[dict], cfg: dict, playlist_url: Optional[str] = None
+):
     logging.debug("interactive_play called with %d entries", len(entries))
     idx = 0
     retry = 3
@@ -276,7 +512,25 @@ def interactive_play(entries: List[dict], cfg: dict):
         logging.debug("Now playing entry: %s, url: %s", title, webpage_url)
         print(f"\nNow playing: [{idx+1}/{len(entries)}] {title}")
         retry_count = 0
+        # Record playlist entry in history (playlist-level)
+        try:
+            append_history(
+                {
+                    "type": "playlist_entry",
+                    "playlist_url": playlist_url,
+                    "track_url": webpage_url,
+                    "title": title,
+                    "timestamp": int(time.time()),
+                }
+            )
+        except Exception:
+            pass
         while retry_count < 3:
+            # try to get duration from metadata
+            info = get_video_info(webpage_url)
+            duration = None
+            if info:
+                duration = info.get("duration")
             player = play_stream(webpage_url, silent=not cfg.get("Debug", False))
             if player is None:
                 print("  Failed to start player.")
@@ -285,6 +539,7 @@ def interactive_play(entries: List[dict], cfg: dict):
             print("  Controls: [n]ext, [r]eplay, [q]uit")
             logging.debug("Player started for entry: %s", title)
             user_action = None
+            start_ts = time.time()
             try:
                 while player.poll() is None:
                     if platform.system() == "Windows":
@@ -327,12 +582,25 @@ def interactive_play(entries: List[dict], cfg: dict):
                                 logging.debug("User requested quit.")
                                 player.terminate()
                                 return
-                    time.sleep(0.2)
+                    # display elapsed/total every 1s
+                    elapsed = int(time.time() - start_ts)
+                    if duration:
+                        total = int(duration)
+                        sys.stdout.write(f"\rElapsed: {elapsed}s / {total}s ")
+                    else:
+                        sys.stdout.write(f"\rElapsed: {elapsed}s")
+                    sys.stdout.flush()
+                    time.sleep(1)
             except KeyboardInterrupt:
                 logging.debug("KeyboardInterrupt: terminating player.")
                 player.terminate()
                 return
             exit_code = player.wait()
+            # clear elapsed line
+            try:
+                sys.stdout.write("\r" + " " * 60 + "\r")
+            except Exception:
+                pass
             logging.debug("ffplay exited with code: %s", exit_code)
             # If abnormal exit, retry up to 2 more times
             if exit_code != 0 and user_action is None:
@@ -414,7 +682,7 @@ def handle_input(raw: str, cfg: dict):
             if entries:
                 logging.debug("Playlist has %d entries.", len(entries))
                 # Use current debug setting for playlist playback
-                interactive_play(entries, cfg)
+                interactive_play(entries, cfg, playlist_url=raw)
             else:
                 logging.debug("Playlist empty or unavailable.")
                 print("Empty or unavailable playlist.")
@@ -422,7 +690,25 @@ def handle_input(raw: str, cfg: dict):
             logging.debug("URL detected as single video.")
             # single video: stream directly using yt-dlp | ffplay pipe
             print("Now playing: [1/1] (single video)")
+            # record history (include title from metadata when available)
+            try:
+                info = get_video_info(raw)
+                title = info.get("title") if info else None
+                append_history(
+                    {
+                        "type": "single",
+                        "playlist_url": None,
+                        "track_url": raw,
+                        "title": title,
+                        "timestamp": int(time.time()),
+                    }
+                )
+            except Exception:
+                pass
             while True:
+                # ensure we have metadata for duration display
+                info = info if "info" in locals() else get_video_info(raw)
+                duration = info.get("duration") if info else None
                 player = play_stream(raw, silent=not cfg.get("Debug", False))
                 print("  Controls: [r]eplay, [q]uit")
                 if player is None:
@@ -430,6 +716,7 @@ def handle_input(raw: str, cfg: dict):
                     return
                 user_action = None
                 try:
+                    start_ts = time.time()
                     while player.poll() is None:
                         if platform.system() == "Windows":
                             import msvcrt
@@ -461,7 +748,14 @@ def handle_input(raw: str, cfg: dict):
                                     logging.debug("User requested quit.")
                                     player.terminate()
                                     return
-                        time.sleep(0.2)
+                        elapsed = int(time.time() - start_ts)
+                        if duration:
+                            total = int(duration)
+                            sys.stdout.write(f"\rElapsed: {elapsed}s / {total}s ")
+                        else:
+                            sys.stdout.write(f"\rElapsed: {elapsed}s")
+                        sys.stdout.flush()
+                        time.sleep(1)
                 except KeyboardInterrupt:
                     logging.debug("KeyboardInterrupt: terminating player.")
                     player.terminate()
@@ -513,7 +807,7 @@ def handle_input(raw: str, cfg: dict):
             logging.debug("Selected indices: %s", indices)
             if selected:
                 logging.debug("Selected entries: %s", selected)
-                interactive_play(selected, cfg)
+                interactive_play(selected, cfg, playlist_url=None)
         except (ValueError, IndexError):
             logging.debug("Invalid selection input.")
             print("Invalid selection.")
@@ -569,6 +863,13 @@ def main():
             if raw.lower() in {"exit", "quit", "q"}:
                 logging.debug("User requested exit.")
                 break
+            if raw.lower() == "history":
+                # hidden command: show paginated history
+                try:
+                    show_history_paged()
+                except Exception as e:
+                    print("Could not load history:", e)
+                continue
             handle_input(raw, cfg)
 
 
