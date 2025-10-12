@@ -33,7 +33,7 @@ HISTORY_INDEX_FILE = "logs/history_index.json"
 # ------------------------------------------------------------------
 def init_logger(debug: bool):
     Path("logs").mkdir(exist_ok=True)
-    level = logging.DEBUG if debug else logging.WARNING
+    # Always allow DEBUG events at the logger level; handlers will filter
     root_logger = logging.getLogger()
     # Remove all handlers associated with the root logger object
     for handler in root_logger.handlers[:]:
@@ -43,10 +43,19 @@ def init_logger(debug: bool):
     formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
     file_handler.setFormatter(formatter)
     stream_handler.setFormatter(formatter)
-    root_logger.setLevel(level)
+    # Keep most verbose logging available internally; handlers decide what
+    # to show. Console should show INFO by default, DEBUG when debug=True.
+    root_logger.setLevel(logging.DEBUG)
+    file_handler.setLevel(logging.DEBUG if debug else logging.INFO)
+    stream_handler.setLevel(logging.DEBUG if debug else logging.INFO)
     root_logger.addHandler(file_handler)
     root_logger.addHandler(stream_handler)
     logging.debug("Logger initialized. Debug mode: %s", debug)
+    logging.info(
+        "Logger configured. Console level=%s, File level=%s",
+        logging.getLevelName(stream_handler.level),
+        logging.getLevelName(file_handler.level),
+    )
 
 
 # ------------------------------------------------------------------
@@ -91,12 +100,14 @@ def ensure_dependencies():
         return
 
     print("Installing missing dependencies …")
+    logging.info("Installing missing dependencies …")
     logging.debug("Attempting to install missing dependencies …")
     logging.debug("Platform: %s", platform.system())
     if is_windows():
         if need_ffmpeg and installed("winget"):
             logging.debug("Installing ffmpeg via winget …")
             print("Installing ffmpeg via winget …")
+            logging.info("Installing ffmpeg via winget …")
             run_elevated(
                 [
                     "winget",
@@ -110,6 +121,7 @@ def ensure_dependencies():
         if need_yt_dlp and installed("winget"):
             logging.debug("Installing yt-dlp via winget …")
             print("Installing yt-dlp via winget …")
+            logging.info("Installing yt-dlp via winget …")
             run_elevated(
                 [
                     "winget",
@@ -124,11 +136,13 @@ def ensure_dependencies():
         if need_ffmpeg:
             logging.debug("Installing ffmpeg via apt …")
             print("Installing ffmpeg via apt …")
+            logging.info("Installing ffmpeg via apt …")
             run_elevated(["sudo", "apt", "update"])
             run_elevated(["sudo", "apt", "install", "ffmpeg", "-y"])
         if need_yt_dlp:
             logging.debug("Installing yt-dlp via pip …")
             print("Installing yt-dlp via pip …")
+            logging.info("Installing yt-dlp via pip …")
             run_elevated([sys.executable, "-m", "pip", "install", "-U", "yt-dlp"])
 
     # Re-check
@@ -151,14 +165,55 @@ def ensure_dependencies():
 # Config
 # ------------------------------------------------------------------
 def load_config() -> dict:
-    defaults = {"SearchLimit": 10, "Debug": False, "CookiesFile": COOKIES_FILE}
+    defaults = {
+        "SearchLimit": 10,
+        "Debug": False,
+        "CookiesFile": COOKIES_FILE,
+        "PlaybackMethod": "pipe",
+        "CacheDir": "cache",
+        "CacheMaxFiles": 50,
+        "CacheRetryCount": 3,
+        "CacheRetryBaseDelay": 1.0,
+        "CacheRetryOnNetworkOnly": True,
+        "CacheDownloadTimeout": 30,
+        "ForceCacheRefresh": False,
+    }
     logging.debug("Loading config from %s", CONFIG_FILE)
     if Path(CONFIG_FILE).exists():
         try:
             with open(CONFIG_FILE, encoding="utf-8") as f:
                 loaded = json.load(f)
                 logging.debug("Loaded config: %s", loaded)
-                defaults.update(loaded)
+                # Coerce loaded values to match types in defaults
+                for k, v in loaded.items():
+                    if k in defaults:
+                        default_val = defaults[k]
+                        # handle booleans represented as strings
+                        if isinstance(default_val, bool) and isinstance(v, str):
+                            lv = v.strip().lower()
+                            if lv in ("true", "1", "yes", "y"):
+                                defaults[k] = True
+                            elif lv in ("false", "0", "no", "n"):
+                                defaults[k] = False
+                            else:
+                                # fall back to python truthiness
+                                defaults[k] = bool(v)
+                        # handle numeric coercion
+                        elif isinstance(default_val, int) and not isinstance(v, bool):
+                            try:
+                                defaults[k] = int(v)
+                            except Exception:
+                                defaults[k] = v
+                        elif isinstance(default_val, float) and not isinstance(v, bool):
+                            try:
+                                defaults[k] = float(v)
+                            except Exception:
+                                defaults[k] = v
+                        else:
+                            defaults[k] = v
+                    else:
+                        # unknown keys, keep as-is
+                        defaults[k] = v
         except Exception as e:
             logging.warning("Could not load config.json – %s", e)
     else:
@@ -261,6 +316,7 @@ def show_history_paged(page_size: int = 10):
     h = load_history()
     if not h:
         print("No history entries.")
+        logging.info("History empty")
         return
     # use persistent play_count if present
 
@@ -297,7 +353,7 @@ def show_history_paged(page_size: int = 10):
             f"History — page {page+1}/{total_pages} (entries {start+1}-{min(end,len(filtered))} of {len(filtered)})"
         )
         print(
-            "Idx Type         Date                 Title                                 URL                                               Plays"
+            "Idx Type         Date                    Title                               URL                                      Plays"
         )
         print(
             "--- -------------- -------------------- ------------------------------------ ---------------------------------------- -----"
@@ -422,6 +478,116 @@ def get_video_info(url: str) -> Optional[dict]:
         return None
 
 
+# ------------------------------------------------------------------
+# Cache helpers
+# ------------------------------------------------------------------
+def ensure_cache_dir(cfg: dict) -> Path:
+    cache_dir = Path(cfg.get("CacheDir", "cache"))
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir
+
+
+def _url_to_filename(url: str) -> str:
+    # produce a short safe filename for a URL
+    import hashlib
+
+    h = hashlib.sha1(url.encode("utf-8")).hexdigest()
+    return h + ".webm"
+
+
+def get_cached_file_for_url(url: str, cfg: dict) -> Optional[Path]:
+    cache_dir = ensure_cache_dir(cfg)
+    fname = _url_to_filename(url)
+    p = cache_dir / fname
+    if p.exists():
+        return p
+    return None
+
+
+def prune_cache(cfg: dict):
+    cache_dir = ensure_cache_dir(cfg)
+    max_files = int(cfg.get("CacheMaxFiles", 50))
+    files = sorted(cache_dir.iterdir(), key=lambda p: p.stat().st_atime)
+    while len(files) > max_files:
+        try:
+            files[0].unlink()
+            files.pop(0)
+        except Exception:
+            break
+
+
+def download_to_cache(url: str, cfg: dict) -> Optional[Path]:
+    # If already cached, return path
+    existing = get_cached_file_for_url(url, cfg)
+    force = bool(cfg.get("ForceCacheRefresh", False))
+    if existing and not force:
+        logging.debug("Cache hit for %s -> %s", url, existing)
+        logging.info("Using cached track for %s -> %s", url, existing)
+        return existing
+    if existing and force:
+        logging.debug(
+            "ForceCacheRefresh enabled, removing existing cache file: %s", existing
+        )
+        try:
+            existing.unlink()
+        except Exception as e:
+            logging.debug("Failed to remove cached file %s: %s", existing, e)
+    cache_dir = ensure_cache_dir(cfg)
+    fname = _url_to_filename(url)
+    out_path = cache_dir / fname
+    # build yt-dlp options for downloading: ensure skip_download is False
+    ydl_opts_local = {**ydl_opts(cfg)}
+    ydl_opts_local.pop("skip_download", None)
+    # let yt-dlp choose extension; use template with %(ext)s
+    stem = out_path.stem
+    out_template = str(cache_dir / (stem + ".%(ext)s"))
+    ydl_opts_local.update({"outtmpl": out_template, "format": "bestaudio/best"})
+    # Use yt_dlp to download directly to the cache path
+    # Retry loop with exponential backoff and jitter
+    max_retries = int(cfg.get("CacheRetryCount", 3))
+    base_delay = float(cfg.get("CacheRetryBaseDelay", 1.0))
+    attempt = 0
+    real_path = None
+    while attempt <= max_retries:
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts_local) as ydl:
+                logging.debug(
+                    "Downloading %s to cache as template %s (attempt %d)",
+                    url,
+                    out_template,
+                    attempt + 1,
+                )
+                ydl.download([url])
+            matches = list(cache_dir.glob(stem + ".*"))
+            if matches:
+                matches.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+                real_path = matches[0]
+            prune_cache(cfg)
+            if real_path and real_path.exists():
+                logging.info("Downloaded and cached %s -> %s", url, real_path)
+                return real_path
+            # if no file found, fallthrough to retry
+        except Exception as e:
+            logging.debug("download_to_cache attempt %d failed: %s", attempt + 1, e)
+        # backoff
+        attempt += 1
+        if attempt > max_retries:
+            break
+        import random
+
+        delay = base_delay * (2 ** (attempt - 1))
+        jitter = random.uniform(0, delay * 0.2)
+        wait = delay + jitter
+        logging.debug(
+            "Retrying download in %.2fs (attempt %d/%d)",
+            wait,
+            attempt + 1,
+            max_retries + 1,
+        )
+        time.sleep(wait)
+    return None
+
+
 def search_yt(query: str, limit: int) -> List[dict]:
     cfg = load_config()
     logging.debug("search_yt called with query='%s', limit=%d", query, limit)
@@ -457,45 +623,78 @@ def extract_stream_url(video_url: str) -> Optional[str]:
 # ------------------------------------------------------------------
 def play_stream(url: str, silent=True) -> subprocess.Popen:
     """
-    Pipe yt-dlp output directly to ffplay, matching the command-line example.
-    url: can be a search string, video URL, or playlist URL.
+    Play via 'pipe' (yt-dlp -> ffplay) or 'cache' (download to cache then play file).
     """
-    logging.debug("play_stream (pipe) called with url=%s, silent=%s", url, silent)
-    ytdlp_cmd = [
-        "yt-dlp",
-        "-f",
-        "bestaudio",
-        "-o",
-        "-",
-        url,
-    ]
     cfg = load_config()
-    cookies = cfg.get("CookiesFile", COOKIES_FILE)
-    if Path(cookies).exists():
-        ytdlp_cmd += ["--cookies", cookies]
-    ffplay_cmd = [
-        "ffplay",
-        "-i",
-        "-",
-        "-nodisp",
-        "-autoexit",
-        "-loglevel",
-        "info" if not silent else "quiet",
-    ]
-    logging.debug("yt-dlp cmd: %s", " ".join(ytdlp_cmd))
-    logging.debug("ffplay cmd: %s", " ".join(ffplay_cmd))
-    try:
-        ytdlp_proc = subprocess.Popen(
-            ytdlp_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
-        )
-        ffplay_proc = subprocess.Popen(
-            ffplay_cmd, stdin=ytdlp_proc.stdout, stdout=subprocess.DEVNULL, stderr=None
-        )
-        logging.debug("yt-dlp pid=%s, ffplay pid=%s", ytdlp_proc.pid, ffplay_proc.pid)
-        return ffplay_proc
-    except Exception as e:
-        logging.error("Failed to start yt-dlp|ffplay pipeline: %s", e)
-        return None
+    method = cfg.get("PlaybackMethod", "pipe")
+    logging.debug(
+        "play_stream called with url=%s, silent=%s, method=%s", url, silent, method
+    )
+    if method == "cache":
+        # download to cache first
+        try:
+            filepath = download_to_cache(url, cfg)
+            if not filepath:
+                logging.error("Cache download failed for %s", url)
+                return None
+            ffplay_cmd = [
+                "ffplay",
+                "-nodisp",
+                "-autoexit",
+                "-loglevel",
+                "info" if not silent else "quiet",
+                str(filepath),
+            ]
+            logging.debug("ffplay cmd (cache): %s", " ".join(ffplay_cmd))
+            proc = subprocess.Popen(ffplay_cmd, stdin=subprocess.DEVNULL)
+            logging.debug("ffplay process started from cache, pid=%s", proc.pid)
+            logging.info("Playing from cache: %s", filepath)
+            return proc
+        except Exception as e:
+            logging.error("Failed to start ffplay from cache: %s", e)
+            return None
+    else:
+        # pipe method
+        ytdlp_cmd = [
+            "yt-dlp",
+            "-f",
+            "bestaudio",
+            "-o",
+            "-",
+            url,
+        ]
+        cookies = cfg.get("CookiesFile", COOKIES_FILE)
+        if Path(cookies).exists():
+            ytdlp_cmd += ["--cookies", cookies]
+        ffplay_cmd = [
+            "ffplay",
+            "-i",
+            "-",
+            "-nodisp",
+            "-autoexit",
+            "-loglevel",
+            "info" if not silent else "quiet",
+        ]
+        logging.debug("yt-dlp cmd: %s", " ".join(ytdlp_cmd))
+        logging.debug("ffplay cmd: %s", " ".join(ffplay_cmd))
+        try:
+            ytdlp_proc = subprocess.Popen(
+                ytdlp_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+            )
+            ffplay_proc = subprocess.Popen(
+                ffplay_cmd,
+                stdin=ytdlp_proc.stdout,
+                stdout=subprocess.DEVNULL,
+                stderr=None,
+            )
+            logging.debug(
+                "yt-dlp pid=%s, ffplay pid=%s", ytdlp_proc.pid, ffplay_proc.pid
+            )
+            logging.info("Playing via pipe: %s", url)
+            return ffplay_proc
+        except Exception as e:
+            logging.error("Failed to start yt-dlp|ffplay pipeline: %s", e)
+            return None
 
 
 def interactive_play(
@@ -511,6 +710,9 @@ def interactive_play(
         webpage_url = e.get("webpage_url") or e.get("url")
         logging.debug("Now playing entry: %s, url: %s", title, webpage_url)
         print(f"\nNow playing: [{idx+1}/{len(entries)}] {title}")
+        logging.info(
+            "Now playing playlist entry %d/%d: %s", idx + 1, len(entries), title
+        )
         retry_count = 0
         # Record playlist entry in history (playlist-level)
         try:
@@ -534,9 +736,11 @@ def interactive_play(
             player = play_stream(webpage_url, silent=not cfg.get("Debug", False))
             if player is None:
                 print("  Failed to start player.")
+                logging.info("Player failed to start for %s", title)
                 idx += 1
                 break
             print("  Controls: [n]ext, [r]eplay, [q]uit")
+            logging.debug("Displayed controls to user")
             logging.debug("Player started for entry: %s", title)
             user_action = None
             start_ts = time.time()
@@ -655,6 +859,7 @@ def interactive_play(
                 idx += 1
                 break
     print("End of playlist.")
+    logging.info("End of playlist")
 
 
 # ------------------------------------------------------------------
@@ -678,6 +883,7 @@ def handle_input(raw: str, cfg: dict):
         if is_playlist(raw):
             logging.debug("URL detected as playlist.")
             print("Playlist URL detected – fetching all entries …")
+            logging.info("Playlist URL detected: %s", raw)
             entries = playlist_to_entries(raw)
             if entries:
                 logging.debug("Playlist has %d entries.", len(entries))
@@ -686,10 +892,12 @@ def handle_input(raw: str, cfg: dict):
             else:
                 logging.debug("Playlist empty or unavailable.")
                 print("Empty or unavailable playlist.")
+                logging.info("Playlist empty or unavailable: %s", raw)
         else:
             logging.debug("URL detected as single video.")
             # single video: stream directly using yt-dlp | ffplay pipe
             print("Now playing: [1/1] (single video)")
+            logging.info("Now playing single video: %s", raw)
             # record history (include title from metadata when available)
             try:
                 info = get_video_info(raw)
@@ -835,14 +1043,22 @@ def main():
         "input", nargs="?", help="Search query, video URL, or playlist URL"
     )
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    parser.add_argument(
+        "--force-cache-refresh",
+        action="store_true",
+        help="Force re-download of cached tracks (overrides existing cache)",
+    )
     args = parser.parse_args()
 
     logging.debug("main() called")
     cfg = load_config()
     if args.debug:
         cfg["Debug"] = True
+    if getattr(args, "force_cache_refresh", False):
+        cfg["ForceCacheRefresh"] = True
     logging.debug("Debug mode: %s", cfg["Debug"])
     init_logger(cfg["Debug"])
+    logging.info("Player starting. Debug=%s", cfg["Debug"])
 
     ensure_dependencies()
 
@@ -869,6 +1085,55 @@ def main():
                     show_history_paged()
                 except Exception as e:
                     print("Could not load history:", e)
+                continue
+            if raw.lower() == "config":
+                # hidden command: view/edit config
+                try:
+                    cfg_current = load_config()
+                    print(json.dumps(cfg_current, indent=2, ensure_ascii=False))
+                except Exception as e:
+                    print("Could not load config:", e)
+                    continue
+                edit = input("Edit config? (y/N): ").strip().lower()
+                if edit == "y":
+                    print(
+                        "Enter key=value lines. Empty line to finish. Current values shown above."
+                    )
+                    while True:
+                        try:
+                            line = input("config> ").strip()
+                        except (EOFError, KeyboardInterrupt):
+                            print()
+                            break
+                        if not line:
+                            break
+                        if "=" not in line:
+                            print("Invalid format. Use key=value")
+                            continue
+                        k, v = line.split("=", 1)
+                        k = k.strip()
+                        v = v.strip()
+                        # simple type coercion
+                        if v.lower() in ("true", "false"):
+                            parsed = v.lower() == "true"
+                        else:
+                            try:
+                                parsed = int(v)
+                            except Exception:
+                                try:
+                                    parsed = float(v)
+                                except Exception:
+                                    parsed = v
+                        cfg_current[k] = parsed
+                    try:
+                        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+                            json.dump(cfg_current, f, ensure_ascii=False, indent=2)
+                        print("Config saved to", CONFIG_FILE)
+                        logging.info("Config saved to %s", CONFIG_FILE)
+                        # update live cfg used by the session
+                        cfg.update(cfg_current)
+                    except Exception as e:
+                        print("Failed to save config:", e)
                 continue
             handle_input(raw, cfg)
 

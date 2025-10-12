@@ -124,6 +124,28 @@ While running the script in interactive mode (`python yt_audio_player.py`) you c
   - While a track is playing the script displays elapsed seconds in the terminal and, when available, the track's total duration (queried via `yt-dlp` metadata).
   - When running with `--debug`, ffplay and debug logs are shown and may interleave with the elapsed-time line.
 
+### Playback modes (new)
+
+Yes, we added options — because sometimes the internet is a diva.
+
+- pipe (default): streams directly from `yt-dlp` into `ffplay` (no disk writes). Fast, lean, glorious.
+- cache: downloads tracks into a local cache directory first, then plays from disk. Useful when your network is flaky or your ISP is mood-swinging.
+
+Config and CLI options you might care about:
+
+- `PlaybackMethod` in `config.json`: set to `pipe` or `cache`.
+- `CacheDir` in `config.json`: directory used for cached tracks (default: `cache`).
+- `CacheMaxFiles` in `config.json`: how many cached items to keep before pruning.
+- `--force-cache-refresh` CLI flag: re-download a track even if a cached copy exists (great for when YouTube updates a video or your cache is possessed).
+
+When using `cache` mode the script will:
+
+- download into `CacheDir` with retries and exponential backoff
+- prune the oldest cached files when `CacheMaxFiles` is exceeded
+- write informative logs about cache hits and downloads (see logs/player.log)
+
+Use cache mode when your internet acts like it’s on dial-up again. Use pipe mode when you want minimal disk activity and the network behaves.
+
 ### Debugging and logs
 
 - Run with `--debug` to enable verbose logging (to console and `logs/player.log`) and to allow ffplay output to appear for troubleshooting:
@@ -137,6 +159,11 @@ python yt_audio_player.py --debug "chill vibes"
   - History entries: `logs/history.json`
   - History index (play counts): `logs/history_index.json`
   - History exports: `logs/history_export.csv` / `logs/history_export.json`
+
+Note on console vs file logging
+
+- By default the script shows INFO-level messages on the console and writes INFO+ to the log file. This means normal operational events (what's playing, playlist boundaries, cache hits, etc.) are visible on your terminal without enabling debug mode.
+- If you need full diagnostic output (stack traces, verbose yt-dlp details, ffplay interleaved output), run with `--debug` which raises both console and file verbosity to DEBUG.
 
 ### Files & configuration
 

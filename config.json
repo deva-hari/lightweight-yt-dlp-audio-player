@@ -1,5 +1,13 @@
 {
   "SearchLimit": 10,
   "Debug": false,
-  "CookiesFile": "cookies.txt"
+  "CookiesFile": "cookies.txt",
+  "PlaybackMethod": "cache",
+  "CacheDir": "cache",
+  "CacheMaxFiles": 50,
+  "CacheRetryCount": 3,
+  "CacheRetryBaseDelay": 1.0,
+  "CacheRetryOnNetworkOnly": true,
+  "CacheDownloadTimeout": 30,
+  "ForceCacheRefresh": false
 }
