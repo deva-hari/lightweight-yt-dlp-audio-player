@@ -4,7 +4,7 @@
   "CookiesFile": "cookies.txt",
   "PlaybackMethod": "cache",
   "CacheDir": "cache",
-  "CacheMaxFiles": 50,
+  "CacheMaxFiles": 150,
   "CacheRetryCount": 3,
   "CacheRetryBaseDelay": 1.0,
   "CacheRetryOnNetworkOnly": true,
