@@ -15,6 +15,32 @@ import sys
 import time
 from pathlib import Path
 from typing import List, Optional
+import urllib.request
+import shutil
+import random
+import signal
+
+
+def _is_version_greater(v_new: str, v_old: str) -> bool:
+    """Return True if v_new > v_old. Prefer packaging when available, fallback to simple token compare."""
+    try:
+        from packaging.version import Version
+
+        return Version(v_new) > Version(v_old)
+    except Exception:
+        # fallback: split on non-alphanum and compare token-wise
+        def to_tokens(s: str):
+            parts = re.split(r"[\.\-]", s)
+            toks = []
+            for p in parts:
+                if p.isdigit():
+                    toks.append(int(p))
+                else:
+                    toks.append(p)
+            return toks
+
+        return to_tokens(v_new) > to_tokens(v_old)
+
 
 try:
     import yt_dlp
@@ -159,6 +185,101 @@ def ensure_dependencies():
         sys.exit("yt-dlp still missing – please install manually.")
     global yt_dlp
     yt_dlp = _yt_dlp
+
+
+# ------------------------------------------------------------------
+# yt-dlp update helpers
+# ------------------------------------------------------------------
+def _get_installed_yt_dlp_version() -> Optional[str]:
+    try:
+        import yt_dlp as _yt
+
+        return getattr(_yt, "__version__", None)
+    except Exception:
+        return None
+
+
+def _get_latest_yt_dlp_version_pypi(timeout: float = 5.0) -> Optional[str]:
+    url = "https://pypi.org/pypi/yt-dlp/json"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            data = json.load(resp)
+            return data.get("info", {}).get("version")
+    except Exception as e:
+        logging.debug("Could not fetch latest yt-dlp version from PyPI: %s", e)
+        return None
+
+
+def _detect_install_method() -> str:
+    """Try to guess how yt-dlp was installed: 'pip', 'winget', 'pipx', 'self' (binary), or 'unknown'."""
+    exe = shutil.which("yt-dlp")
+    try:
+        import yt_dlp as _yt
+
+        module_file = getattr(_yt, "__file__", "") or ""
+    except Exception:
+        module_file = ""
+    if module_file and "site-packages" in module_file:
+        return "pip"
+    if exe:
+        low = exe.lower()
+        if "program files" in low or "windowsapps" in low:
+            return "winget"
+        if "pipx" in low:
+            return "pipx"
+        # default to 'self' if binary appears on PATH
+        return "self"
+    return "unknown"
+
+
+def _suggest_update_commands(method: str) -> List[str]:
+    cmds = []
+    # safe generic suggestions
+    cmds.append(
+        "yt-dlp -U  # yt-dlp's built-in self-update (may work for exe installs)"
+    )
+    cmds.append(f"{sys.executable} -m pip install -U yt-dlp  # pip upgrade")
+    cmds.append("pipx upgrade yt-dlp  # if installed via pipx")
+    cmds.append("winget upgrade --id yt-dlp.yt-dlp -e  # on Windows with winget")
+    # prioritize method-specific
+    if method == "pip":
+        return [f"{sys.executable} -m pip install -U yt-dlp"]
+    if method == "pipx":
+        return ["pipx upgrade yt-dlp"]
+    if method == "winget":
+        return ["winget upgrade --id yt-dlp.yt-dlp -e"]
+    if method == "self":
+        return ["yt-dlp -U"]
+    return cmds
+
+
+def _attempt_runtime_update(method: str) -> bool:
+    """Attempt to update yt-dlp using the detected method. Returns True on success."""
+    try:
+        if method == "pip":
+            cmd = [sys.executable, "-m", "pip", "install", "-U", "yt-dlp"]
+            logging.info("Attempting to update yt-dlp via pip: %s", " ".join(cmd))
+            subprocess.check_call(cmd)
+            return True
+        if method == "self":
+            cmd = [shutil.which("yt-dlp") or "yt-dlp", "-U"]
+            logging.info("Attempting to self-update yt-dlp: %s", " ".join(cmd))
+            subprocess.check_call(cmd)
+            return True
+        if method == "winget":
+            cmd = ["winget", "upgrade", "--id", "yt-dlp.yt-dlp", "-e"]
+            logging.info("Attempting to update yt-dlp via winget: %s", " ".join(cmd))
+            subprocess.check_call(cmd)
+            return True
+        if method == "pipx":
+            cmd = ["pipx", "upgrade", "yt-dlp"]
+            logging.info("Attempting to update yt-dlp via pipx: %s", " ".join(cmd))
+            subprocess.check_call(cmd)
+            return True
+    except Exception as e:
+        logging.warning("Runtime update attempt failed: %s", e)
+        return False
+    return False
 
 
 # ------------------------------------------------------------------
@@ -1035,6 +1156,188 @@ def playlist_to_entries(playlist_url: str) -> List[dict]:
 
 
 # ------------------------------------------------------------------
+# Cached playback helpers (start, send key, pause/resume)
+# ------------------------------------------------------------------
+def _start_ffplay_for_file(filepath: str, cfg: dict, silent: bool) -> subprocess.Popen:
+    ffplay_cmd = [
+        "ffplay",
+        "-i",
+        str(filepath),
+        "-nodisp",
+        "-autoexit",
+        "-loglevel",
+        "info" if not silent else "quiet",
+    ]
+    logging.debug("ffplay cmd (cache, controllable stdin): %s", " ".join(ffplay_cmd))
+    try:
+        proc = subprocess.Popen(
+            ffplay_cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        logging.info(
+            "ffplay started for cached file %s (pid=%s)",
+            filepath,
+            getattr(proc, "pid", None),
+        )
+        return proc
+    except Exception as e:
+        logging.error("Failed to start ffplay for cached file %s: %s", filepath, e)
+        return None
+
+
+def _ffplay_send_key(proc: subprocess.Popen, key: bytes = b"p") -> bool:
+    if not proc or proc.poll() is not None:
+        logging.debug("_ffplay_send_key: process not running or exited")
+        return False
+    try:
+        if proc.stdin:
+            proc.stdin.write(key)
+            proc.stdin.flush()
+            logging.debug("Wrote key %r to ffplay stdin (pid=%s)", key, proc.pid)
+            return True
+    except Exception as e:
+        logging.debug("Failed to write to ffplay stdin: %s", e)
+    return False
+
+
+def _suspend_process_posix(proc: subprocess.Popen) -> bool:
+    try:
+        os.kill(proc.pid, signal.SIGSTOP)
+        logging.debug("Sent SIGSTOP to pid %s", proc.pid)
+        return True
+    except Exception as e:
+        logging.debug("SIGSTOP failed: %s", e)
+        return False
+
+
+def _resume_process_posix(proc: subprocess.Popen) -> bool:
+    try:
+        os.kill(proc.pid, signal.SIGCONT)
+        logging.debug("Sent SIGCONT to pid %s", proc.pid)
+        return True
+    except Exception as e:
+        logging.debug("SIGCONT failed: %s", e)
+        return False
+
+
+def pause_cached_playback(proc: subprocess.Popen) -> bool:
+    if _ffplay_send_key(proc, b"p"):
+        logging.info(
+            "Toggled pause via ffplay stdin (pid=%s)", getattr(proc, "pid", None)
+        )
+        return True
+    if os.name == "posix":
+        ok = _suspend_process_posix(proc)
+        if ok:
+            logging.info(
+                "Paused ffplay via SIGSTOP (pid=%s)", getattr(proc, "pid", None)
+            )
+        return ok
+    logging.warning("Unable to pause ffplay process on this platform.")
+    return False
+
+
+def resume_cached_playback(proc: subprocess.Popen) -> bool:
+    if _ffplay_send_key(proc, b"p"):
+        logging.info(
+            "Toggled resume via ffplay stdin (pid=%s)", getattr(proc, "pid", None)
+        )
+        return True
+    if os.name == "posix":
+        ok = _resume_process_posix(proc)
+        if ok:
+            logging.info(
+                "Resumed ffplay via SIGCONT (pid=%s)", getattr(proc, "pid", None)
+            )
+        return ok
+    logging.warning("Unable to resume ffplay process on this platform.")
+    return False
+
+
+def offline_play(cfg: dict):
+    """Hidden command: play cached audio files in shuffle order.
+    Controls while playing: n=next, p=toggle pause, q=quit
+    """
+    cache_dir = ensure_cache_dir(cfg)
+    files = [
+        p
+        for p in cache_dir.iterdir()
+        if p.is_file() and p.suffix.lower() not in (".json",)
+    ]
+    if not files:
+        print("No cached audio files found in", str(cache_dir))
+        logging.info("offline: no cached files in %s", cache_dir)
+        return
+    random.shuffle(files)
+    logging.info("offline: playing %d cached files (shuffled)", len(files))
+    idx = 0
+    while 0 <= idx < len(files):
+        f = files[idx]
+        title = f.name
+        # try sidecar metadata
+        sidecar = f.with_suffix(".json")
+        if sidecar.exists():
+            try:
+                with open(sidecar, encoding="utf-8") as sf:
+                    meta = json.load(sf)
+                    title = meta.get("title") or title
+            except Exception:
+                pass
+        print(f"\nOffline play [{idx+1}/{len(files)}]: {title}")
+        logging.info("offline now playing: %s", f)
+        # start ffplay with controllable stdin
+        player = _start_ffplay_for_file(str(f), cfg, silent=not cfg.get("Debug", False))
+        if player is None:
+            logging.warning("offline: failed to start player for %s", f)
+            idx += 1
+            continue
+        try:
+            while player.poll() is None:
+                # check for keypress
+                if platform.system() == "Windows":
+                    import msvcrt
+
+                    if msvcrt.kbhit():
+                        ch = msvcrt.getch().decode().lower()
+                        logging.debug("offline: user pressed key: %s", ch)
+                        if ch == "n":
+                            player.terminate()
+                            break
+                        elif ch == "p":
+                            _ffplay_send_key(player, b"p")
+                        elif ch == "q":
+                            player.terminate()
+                            return
+                else:
+                    import select
+
+                    if select.select([sys.stdin], [], [], 0)[0]:
+                        ch = sys.stdin.read(1).lower()
+                        logging.debug("offline: user pressed key: %s", ch)
+                        if ch == "n":
+                            player.terminate()
+                            break
+                        elif ch == "p":
+                            _ffplay_send_key(player, b"p")
+                        elif ch == "q":
+                            player.terminate()
+                            return
+                time.sleep(0.1)
+        except KeyboardInterrupt:
+            logging.debug("offline: KeyboardInterrupt, terminating player.")
+            try:
+                player.terminate()
+            except Exception:
+                pass
+            return
+        idx += 1
+    print("Offline playback finished.")
+    logging.info("offline: finished playing cached files")
+
+
+# ------------------------------------------------------------------
 # Main
 # ------------------------------------------------------------------
 def main():
@@ -1047,6 +1350,16 @@ def main():
         "--force-cache-refresh",
         action="store_true",
         help="Force re-download of cached tracks (overrides existing cache)",
+    )
+    parser.add_argument(
+        "--update-yt-dlp",
+        action="store_true",
+        help="Check for a newer yt-dlp and attempt to update it using the detected method",
+    )
+    parser.add_argument(
+        "--offline",
+        action="store_true",
+        help="Start playback from cached files in shuffle mode (hidden)",
     )
     args = parser.parse_args()
 
@@ -1061,6 +1374,94 @@ def main():
     logging.info("Player starting. Debug=%s", cfg["Debug"])
 
     ensure_dependencies()
+
+    # Check yt-dlp version and notify if update available. Optionally attempt update.
+    try:
+        installed_v = _get_installed_yt_dlp_version()
+        latest_v = _get_latest_yt_dlp_version_pypi()
+        if installed_v and latest_v:
+            logging.debug(
+                "yt-dlp installed version=%s latest=%s", installed_v, latest_v
+            )
+            try:
+                if _is_version_greater(latest_v, installed_v):
+                    msg = f"A newer yt-dlp is available: {installed_v} -> {latest_v}."
+                    print(msg)
+                    logging.info(msg)
+                    method = _detect_install_method()
+                    cmds = _suggest_update_commands(method)
+                    print(
+                        "Suggested update commands (choose the one matching your install method):"
+                    )
+                    for c in cmds:
+                        print("  ", c)
+                    # If user passed the flag, attempt update non-interactively
+                    if args.update_yt_dlp:
+                        print(
+                            "Attempting runtime update using detected method:", method
+                        )
+                        ok = _attempt_runtime_update(method)
+                        if ok:
+                            print(
+                                "yt-dlp updated successfully. You may need to restart the script."
+                            )
+                            logging.info("yt-dlp updated successfully via %s", method)
+                        else:
+                            print(
+                                "Automatic update failed. See logs for details and try one of the suggested commands."
+                            )
+                    # Otherwise, if running interactively, ask the user
+                    elif sys.stdin is not None and sys.stdin.isatty():
+                        try:
+                            resp = input("Update yt-dlp now? [Y/n]: ").strip().lower()
+                        except (EOFError, KeyboardInterrupt):
+                            resp = "n"
+                        if resp in ("", "y", "yes"):
+                            print(
+                                "Attempting runtime update using detected method:",
+                                method,
+                            )
+                            ok = _attempt_runtime_update(method)
+                            if ok:
+                                print(
+                                    "yt-dlp updated successfully. You may need to restart the script."
+                                )
+                                logging.info(
+                                    "yt-dlp updated successfully via %s", method
+                                )
+                            else:
+                                print(
+                                    "Automatic update failed. See logs for details and try one of the suggested commands."
+                                )
+                        else:
+                            print(
+                                "Skipping automatic update. You can update later using one of the suggested commands."
+                            )
+                    else:
+                        print(
+                            "Non-interactive session: run with --update-yt-dlp to attempt an automatic update or run one of the suggested commands manually."
+                        )
+                else:
+                    logging.debug("yt-dlp is up-to-date (%s)", installed_v)
+            except Exception as e:
+                logging.debug("Version comparison failed: %s", e)
+        else:
+            logging.debug(
+                "Could not determine installed or latest yt-dlp version (installed=%s latest=%s)",
+                installed_v,
+                latest_v,
+            )
+    except Exception as e:
+        logging.debug("yt-dlp update check failed: %s", e)
+
+    # If offline flag passed, start offline playback and exit
+    if getattr(args, "offline", False):
+        logging.info("Starting offline playback (cache) via --offline flag")
+        try:
+            offline_play(cfg)
+        except Exception as e:
+            logging.error("Offline playback failed: %s", e)
+        return
 
     if args.input:
         logging.debug("Input argument provided: %s", args.input)

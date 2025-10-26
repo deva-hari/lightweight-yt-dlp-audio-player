@@ -107,6 +107,12 @@ While running the script in interactive mode (`python yt_audio_player.py`) you c
   - `clear` — delete all history (prompted confirmation required; type `YES` to proceed)
   - `help` — show the viewer commands
 
+- `offline` (hidden): play cached audio files in your cache directory in shuffled order
+  - Usage: type `offline` at the `YouTube>` prompt.
+  - Behavior: scans `CacheDir` (default `cache`) for downloaded audio files, shuffles them, and plays them one-by-one.
+  - Controls while playing: `n` = next, `p` = pause/resume (best-effort), `q` = quit offline playback.
+  - Notes: this works only when you have cached tracks (i.e., `PlaybackMethod` = `cache` or you've previously downloaded tracks). Pause/resume uses ffplay's `p` toggle when available; on POSIX systems a fallback suspend/resume is used if needed.
+
 - What is stored in history
   - Each history entry is a JSON object with fields including: `type` (single|playlist_entry), `track_url`, `playlist_url` (when applicable), `title`, `timestamp` (unix epoch), and `play_count` (persistent counter incremented per-track URL).
   - Files: `logs/history.json` (entries) and `logs/history_index.json` (persistent play count index).
