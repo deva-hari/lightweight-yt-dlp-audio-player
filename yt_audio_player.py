@@ -106,9 +106,8 @@ def run_elevated(cmd: List[str], shell=False):
         return False
 
 
-def ensure_dependencies():
+def ensure_dependencies(check_mpv=False):
     logging.debug("Checking dependencies …")
-    logging.debug("Checking if ffmpeg is installed …")
     try:
         import yt_dlp as _yt_dlp
 
@@ -116,66 +115,93 @@ def ensure_dependencies():
     except ImportError:
         _yt_dlp = None
         logging.debug("yt_dlp not found.")
-    need_ffmpeg = not installed("ffmpeg")
-    logging.debug("ffmpeg needed: %s", need_ffmpeg)
-    need_yt_dlp = _yt_dlp is None
-    logging.debug("yt_dlp needed: %s", need_yt_dlp)
 
-    if not need_ffmpeg and not need_yt_dlp:
+    need_ffmpeg = not installed("ffmpeg")
+    need_yt_dlp = _yt_dlp is None
+    need_mpv = check_mpv and not installed("mpv")
+
+    logging.debug("ffmpeg needed: %s", need_ffmpeg)
+    logging.debug("yt_dlp needed: %s", need_yt_dlp)
+    logging.debug("mpv needed: %s", need_mpv)
+
+    if not any([need_ffmpeg, need_yt_dlp, need_mpv]):
         logging.debug("All dependencies satisfied.")
-        return
+        return True
 
     print("Installing missing dependencies …")
     logging.info("Installing missing dependencies …")
-    logging.debug("Attempting to install missing dependencies …")
     logging.debug("Platform: %s", platform.system())
+
     if is_windows():
-        if need_ffmpeg and installed("winget"):
-            logging.debug("Installing ffmpeg via winget …")
-            print("Installing ffmpeg via winget …")
-            logging.info("Installing ffmpeg via winget …")
-            run_elevated(
-                [
-                    "winget",
-                    "install",
-                    "--id=Gyan.FFmpeg",
-                    "-e",
-                    "--accept-package-agreements",
-                    "--accept-source-agreements",
-                ]
-            )
-        if need_yt_dlp and installed("winget"):
-            logging.debug("Installing yt-dlp via winget …")
-            print("Installing yt-dlp via winget …")
-            logging.info("Installing yt-dlp via winget …")
-            run_elevated(
-                [
-                    "winget",
-                    "install",
-                    "--id=yt-dlp.yt-dlp",
-                    "-e",
-                    "--accept-package-agreements",
-                    "--accept-source-agreements",
-                ]
-            )
+        if installed("winget"):
+            if need_ffmpeg:
+                logging.debug("Installing ffmpeg via winget …")
+                print("Installing ffmpeg via winget …")
+                run_elevated(
+                    [
+                        "winget",
+                        "install",
+                        "--id=Gyan.FFmpeg",
+                        "-e",
+                        "--accept-package-agreements",
+                        "--accept-source-agreements",
+                    ]
+                )
+            if need_yt_dlp:
+                logging.debug("Installing yt-dlp via winget …")
+                print("Installing yt-dlp via winget …")
+                run_elevated(
+                    [
+                        "winget",
+                        "install",
+                        "--id=yt-dlp.yt-dlp",
+                        "-e",
+                        "--accept-package-agreements",
+                        "--accept-source-agreements",
+                    ]
+                )
+            if need_mpv:
+                logging.debug("Installing mpv via winget …")
+                print("Installing mpv via winget …")
+                run_elevated(
+                    [
+                        "winget",
+                        "install",
+                        "--id=mpv.mpv",
+                        "-e",
+                        "--accept-package-agreements",
+                        "--accept-source-agreements",
+                    ]
+                )
     else:  # Linux
-        if need_ffmpeg:
-            logging.debug("Installing ffmpeg via apt …")
-            print("Installing ffmpeg via apt …")
-            logging.info("Installing ffmpeg via apt …")
+        if need_ffmpeg or need_mpv:
+            logging.debug("Installing ffmpeg/mpv via apt …")
+            print("Installing ffmpeg/mpv via apt …")
             run_elevated(["sudo", "apt", "update"])
-            run_elevated(["sudo", "apt", "install", "ffmpeg", "-y"])
+            pkgs = []
+            if need_ffmpeg:
+                pkgs.append("ffmpeg")
+            if need_mpv:
+                pkgs.append("mpv")
+            if pkgs:
+                run_elevated(["sudo", "apt", "install"] + pkgs + ["-y"])
+
         if need_yt_dlp:
             logging.debug("Installing yt-dlp via pip …")
             print("Installing yt-dlp via pip …")
-            logging.info("Installing yt-dlp via pip …")
             run_elevated([sys.executable, "-m", "pip", "install", "-U", "yt-dlp"])
 
     # Re-check
-    logging.debug("Re-checking ffmpeg and yt-dlp after attempted install …")
-    if not installed("ffmpeg"):
+    logging.debug("Re-checking dependencies after attempted install …")
+    if need_ffmpeg and not installed("ffmpeg"):
         logging.error("ffmpeg still missing after attempted install.")
         sys.exit("ffmpeg still missing – please install manually.")
+    if need_mpv and not installed("mpv"):
+        logging.error("mpv still missing after attempted install.")
+        if check_mpv:  # Only exit if mpv was actually required
+            sys.exit("mpv still missing – please install manually.")
+        return False
+
     try:
         import yt_dlp as _yt_dlp
 
@@ -183,8 +209,10 @@ def ensure_dependencies():
     except ImportError:
         logging.error("yt-dlp still missing after attempted install.")
         sys.exit("yt-dlp still missing – please install manually.")
+
     global yt_dlp
     yt_dlp = _yt_dlp
+    return True
 
 
 # ------------------------------------------------------------------
@@ -352,10 +380,8 @@ def ydl_opts(cfg: dict, audio_only=True) -> dict:
         "no_warnings": True,
         "extract_flat": False,
         "skip_download": True,
-        "format": "bestaudio/best",
+        "format": "bestaudio/best" if audio_only else "best",
     }
-    if audio_only:
-        opts["format"] = "bestaudio/best"
     cookies = cfg.get("CookiesFile", COOKIES_FILE)
     if Path(cookies).exists():
         opts["cookiefile"] = cookies
@@ -742,16 +768,81 @@ def extract_stream_url(video_url: str) -> Optional[str]:
 # ------------------------------------------------------------------
 # Playback
 # ------------------------------------------------------------------
-def play_stream(url: str, silent=True) -> subprocess.Popen:
+def play_stream(url: str, silent=True, video_mode=False) -> subprocess.Popen:
     """
-    Play via 'pipe' (yt-dlp -> ffplay) or 'cache' (download to cache then play file).
+    Play content based on mode and method:
+    - Audio mode:
+      - pipe: yt-dlp -> ffplay
+      - cache: download first, then ffplay
+    - Video mode:
+      - pipe: pass URL directly to mpv (full features)
+      - cache: download first, then mpv
     """
     cfg = load_config()
     method = cfg.get("PlaybackMethod", "pipe")
     logging.debug(
-        "play_stream called with url=%s, silent=%s, method=%s", url, silent, method
+        "play_stream called with url=%s, silent=%s, method=%s, video_mode=%s",
+        url,
+        silent,
+        method,
+        video_mode,
     )
-    if method == "cache":
+
+    if video_mode:
+        if method == "cache":
+            # Download to cache first, then play with mpv
+            try:
+                filepath = download_to_cache(url, cfg)
+                if not filepath:
+                    logging.error("Cache download failed for %s", url)
+                    return None
+
+                mpv_cmd = [
+                    "mpv",
+                    str(filepath),
+                    "--force-window",
+                    "--no-terminal" if silent else None,
+                    "--msg-level=all=no" if silent else None,
+                ]
+                mpv_cmd = [c for c in mpv_cmd if c is not None]
+
+                logging.debug("mpv cmd (cache): %s", " ".join(mpv_cmd))
+                proc = subprocess.Popen(
+                    mpv_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                )
+                logging.debug("mpv process started from cache, pid=%s", proc.pid)
+                logging.info("Playing video from cache: %s", filepath)
+                return proc
+            except Exception as e:
+                logging.error("Failed to start mpv from cache: %s", e)
+                return None
+        else:
+            # Pipe mode: Let mpv handle everything - pass URL directly
+            cookies = cfg.get("CookiesFile", COOKIES_FILE)
+            mpv_cmd = [
+                "mpv",
+                url,
+                "--force-window",
+                "--no-terminal" if silent else None,
+                "--msg-level=all=no" if silent else None,
+                f"--cookies-file={cookies}" if Path(cookies).exists() else None,
+            ]
+            mpv_cmd = [c for c in mpv_cmd if c is not None]
+
+            logging.debug("mpv cmd (direct): %s", " ".join(mpv_cmd))
+            try:
+                proc = subprocess.Popen(
+                    mpv_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                )
+                logging.debug("mpv process started (direct), pid=%s", proc.pid)
+                logging.info("Playing video via mpv: %s", url)
+                return proc
+            except Exception as e:
+                logging.error("Failed to start mpv: %s", e)
+                return None
+
+    # Audio playback modes
+    elif method == "cache":
         # download to cache first
         try:
             filepath = download_to_cache(url, cfg)
@@ -775,7 +866,7 @@ def play_stream(url: str, silent=True) -> subprocess.Popen:
             logging.error("Failed to start ffplay from cache: %s", e)
             return None
     else:
-        # pipe method
+        # audio pipe method
         ytdlp_cmd = [
             "yt-dlp",
             "-f",
@@ -819,9 +910,13 @@ def play_stream(url: str, silent=True) -> subprocess.Popen:
 
 
 def interactive_play(
-    entries: List[dict], cfg: dict, playlist_url: Optional[str] = None
+    entries: List[dict], cfg: dict, playlist_url: Optional[str] = None, video_mode=False
 ):
-    logging.debug("interactive_play called with %d entries", len(entries))
+    logging.debug(
+        "interactive_play called with %d entries, video_mode=%s",
+        len(entries),
+        video_mode,
+    )
     idx = 0
     retry = 3
     while 0 <= idx < len(entries):
@@ -854,7 +949,9 @@ def interactive_play(
             duration = None
             if info:
                 duration = info.get("duration")
-            player = play_stream(webpage_url, silent=not cfg.get("Debug", False))
+            player = play_stream(
+                webpage_url, silent=not cfg.get("Debug", False), video_mode=video_mode
+            )
             if player is None:
                 print("  Failed to start player.")
                 logging.info("Player failed to start for %s", title)
@@ -907,34 +1004,36 @@ def interactive_play(
                                 logging.debug("User requested quit.")
                                 player.terminate()
                                 return
-                    # display elapsed/total every 1s
-                    elapsed = int(time.time() - start_ts)
-                    if duration:
-                        total = int(duration)
-                        sys.stdout.write(f"\rElapsed: {elapsed}s / {total}s ")
-                    else:
-                        sys.stdout.write(f"\rElapsed: {elapsed}s")
-                    sys.stdout.flush()
-                    time.sleep(1)
+                    # Only show elapsed time in audio mode
+                    if not video_mode:
+                        elapsed = int(time.time() - start_ts)
+                        if duration:
+                            total = int(duration)
+                            sys.stdout.write(f"\rElapsed: {elapsed}s / {total}s ")
+                        else:
+                            sys.stdout.write(f"\rElapsed: {elapsed}s")
+                        sys.stdout.flush()
+                    time.sleep(0.1)  # More responsive controls
             except KeyboardInterrupt:
                 logging.debug("KeyboardInterrupt: terminating player.")
                 player.terminate()
                 return
             exit_code = player.wait()
-            # clear elapsed line
-            try:
-                sys.stdout.write("\r" + " " * 60 + "\r")
-            except Exception:
-                pass
-            logging.debug("ffplay exited with code: %s", exit_code)
+            # clear elapsed line in audio mode
+            if not video_mode:
+                try:
+                    sys.stdout.write("\r" + " " * 60 + "\r")
+                except Exception:
+                    pass
+            logging.debug("Player exited with code: %s", exit_code)
             # If abnormal exit, retry up to 2 more times
             if exit_code != 0 and user_action is None:
                 retry_count += 1
                 print(
-                    f"  ffplay exited abnormally (code {exit_code}), retrying ({retry_count}/3)..."
+                    f"  Player exited abnormally (code {exit_code}), retrying ({retry_count}/3)..."
                 )
                 logging.warning(
-                    "ffplay exited abnormally (code %s), retrying (%d/3)...",
+                    "Player exited abnormally (code %s), retrying (%d/3)...",
                     exit_code,
                     retry_count,
                 )
@@ -994,8 +1093,8 @@ def is_playlist(url: str) -> bool:
     return "playlist" in url or "list=" in url
 
 
-def handle_input(raw: str, cfg: dict):
-    logging.debug("handle_input called with raw='%s'", raw)
+def handle_input(raw: str, cfg: dict, video_mode=False):
+    logging.debug("handle_input called with raw='%s', video_mode=%s", raw, video_mode)
     raw = raw.strip()
     if not raw:
         return
@@ -1009,16 +1108,18 @@ def handle_input(raw: str, cfg: dict):
             if entries:
                 logging.debug("Playlist has %d entries.", len(entries))
                 # Use current debug setting for playlist playback
-                interactive_play(entries, cfg, playlist_url=raw)
+                interactive_play(entries, cfg, playlist_url=raw, video_mode=video_mode)
             else:
                 logging.debug("Playlist empty or unavailable.")
                 print("Empty or unavailable playlist.")
                 logging.info("Playlist empty or unavailable: %s", raw)
         else:
             logging.debug("URL detected as single video.")
-            # single video: stream directly using yt-dlp | ffplay pipe
+            # single video: stream directly
             print("Now playing: [1/1] (single video)")
-            logging.info("Now playing single video: %s", raw)
+            logging.info(
+                "Now playing single %s: %s", "video" if video_mode else "audio", raw
+            )
             # record history (include title from metadata when available)
             try:
                 info = get_video_info(raw)
@@ -1038,7 +1139,9 @@ def handle_input(raw: str, cfg: dict):
                 # ensure we have metadata for duration display
                 info = info if "info" in locals() else get_video_info(raw)
                 duration = info.get("duration") if info else None
-                player = play_stream(raw, silent=not cfg.get("Debug", False))
+                player = play_stream(
+                    raw, silent=not cfg.get("Debug", False), video_mode=video_mode
+                )
                 print("  Controls: [r]eplay, [q]uit")
                 if player is None:
                     print("  Failed to start player.")
@@ -1077,18 +1180,26 @@ def handle_input(raw: str, cfg: dict):
                                     logging.debug("User requested quit.")
                                     player.terminate()
                                     return
-                        elapsed = int(time.time() - start_ts)
-                        if duration:
-                            total = int(duration)
-                            sys.stdout.write(f"\rElapsed: {elapsed}s / {total}s ")
-                        else:
-                            sys.stdout.write(f"\rElapsed: {elapsed}s")
-                        sys.stdout.flush()
-                        time.sleep(1)
+                        # In video mode, don't show elapsed time since mpv has its own OSD
+                        if not video_mode:
+                            elapsed = int(time.time() - start_ts)
+                            if duration:
+                                total = int(duration)
+                                sys.stdout.write(f"\rElapsed: {elapsed}s / {total}s ")
+                            else:
+                                sys.stdout.write(f"\rElapsed: {elapsed}s")
+                            sys.stdout.flush()
+                        time.sleep(0.1)  # Shorter sleep for more responsive controls
                 except KeyboardInterrupt:
                     logging.debug("KeyboardInterrupt: terminating player.")
                     player.terminate()
                     return
+                # Clear elapsed line in audio mode
+                if not video_mode:
+                    try:
+                        sys.stdout.write("\r" + " " * 60 + "\r")
+                    except Exception:
+                        pass
                 # If user requested replay, loop again
                 if user_action == "replay":
                     continue
@@ -1341,7 +1452,7 @@ def offline_play(cfg: dict):
 # Main
 # ------------------------------------------------------------------
 def main():
-    parser = argparse.ArgumentParser(description="Lightweight YouTube audio player")
+    parser = argparse.ArgumentParser(description="Lightweight YouTube player")
     parser.add_argument(
         "input", nargs="?", help="Search query, video URL, or playlist URL"
     )
@@ -1361,6 +1472,11 @@ def main():
         action="store_true",
         help="Start playback from cached files in shuffle mode (hidden)",
     )
+    parser.add_argument(
+        "--video",
+        action="store_true",
+        help="Enable video playback mode using mpv player",
+    )
     args = parser.parse_args()
 
     logging.debug("main() called")
@@ -1372,6 +1488,12 @@ def main():
     logging.debug("Debug mode: %s", cfg["Debug"])
     init_logger(cfg["Debug"])
     logging.info("Player starting. Debug=%s", cfg["Debug"])
+
+    # Check for mpv if video mode enabled
+    if args.video:
+        logging.info("Video mode enabled, checking for mpv player")
+        if not ensure_dependencies(check_mpv=True):
+            sys.exit("mpv player required for video mode")
 
     ensure_dependencies()
 
@@ -1465,13 +1587,14 @@ def main():
 
     if args.input:
         logging.debug("Input argument provided: %s", args.input)
-        handle_input(args.input, cfg)
+        handle_input(args.input, cfg, video_mode=args.video)
     else:
         # interactive session
-        logging.debug("Entering interactive session loop.")
+        logging.debug("Entering interactive session loop. Video mode: %s", args.video)
         while True:
             try:
-                raw = input("\nYouTube> ").strip()
+                prompt = "YouTube(video)> " if args.video else "YouTube> "
+                raw = input(f"\n{prompt}").strip()
                 logging.debug("User input: %s", raw)
             except (EOFError, KeyboardInterrupt):
                 logging.debug("Session ended by user.")
@@ -1536,7 +1659,7 @@ def main():
                     except Exception as e:
                         print("Failed to save config:", e)
                 continue
-            handle_input(raw, cfg)
+            handle_input(raw, cfg, video_mode=args.video)
 
 
 if __name__ == "__main__":
