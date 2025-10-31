@@ -663,13 +663,18 @@ def prune_cache(cfg: dict):
             break
 
 
-def download_to_cache(url: str, cfg: dict) -> Optional[Path]:
+def download_to_cache(url: str, cfg: dict, video_mode: bool = False) -> Optional[Path]:
     # If already cached, return path
     existing = get_cached_file_for_url(url, cfg)
     force = bool(cfg.get("ForceCacheRefresh", False))
     if existing and not force:
         logging.debug("Cache hit for %s -> %s", url, existing)
-        logging.info("Using cached track for %s -> %s", url, existing)
+        logging.info(
+            "Using cached %s for %s -> %s",
+            "video" if video_mode else "track",
+            url,
+            existing,
+        )
         return existing
     if existing and force:
         logging.debug(
@@ -683,12 +688,14 @@ def download_to_cache(url: str, cfg: dict) -> Optional[Path]:
     fname = _url_to_filename(url)
     out_path = cache_dir / fname
     # build yt-dlp options for downloading: ensure skip_download is False
-    ydl_opts_local = {**ydl_opts(cfg)}
+    ydl_opts_local = {**ydl_opts(cfg, audio_only=not video_mode)}
     ydl_opts_local.pop("skip_download", None)
     # let yt-dlp choose extension; use template with %(ext)s
     stem = out_path.stem
     out_template = str(cache_dir / (stem + ".%(ext)s"))
-    ydl_opts_local.update({"outtmpl": out_template, "format": "bestaudio/best"})
+    ydl_opts_local.update(
+        {"outtmpl": out_template, "format": "best" if video_mode else "bestaudio/best"}
+    )
     # Use yt_dlp to download directly to the cache path
     # Retry loop with exponential backoff and jitter
     max_retries = int(cfg.get("CacheRetryCount", 3))
@@ -789,33 +796,50 @@ def play_stream(url: str, silent=True, video_mode=False) -> subprocess.Popen:
     )
 
     if video_mode:
+        # Get the correct path/url to play
+        play_path = url
         if method == "cache":
-            # Download to cache first, then play with mpv
-            try:
-                filepath = download_to_cache(url, cfg)
+            # For cached files, we already have the file path
+            if Path(url).exists():  # If url is actually a local file path
+                play_path = url
+            else:
+                # Otherwise download to cache
+                filepath = download_to_cache(url, cfg, video_mode=True)
                 if not filepath:
                     logging.error("Cache download failed for %s", url)
                     return None
+                play_path = str(filepath)
 
-                mpv_cmd = [
-                    "mpv",
-                    str(filepath),
-                    "--force-window",
-                    "--no-terminal" if silent else None,
-                    "--msg-level=all=no" if silent else None,
-                ]
-                mpv_cmd = [c for c in mpv_cmd if c is not None]
+        # Construct mpv command
+        mpv_cmd = [
+            "mpv",
+            play_path,
+            "--force-window",
+            "--no-terminal" if silent else None,
+            "--msg-level=all=no" if silent else None,
+        ]
+        # Add cookies only for URLs, not local files
+        if not Path(play_path).exists():
+            cookies = cfg.get("CookiesFile", COOKIES_FILE)
+            if Path(cookies).exists():
+                mpv_cmd.append(f"--cookies-file={cookies}")
 
-                logging.debug("mpv cmd (cache): %s", " ".join(mpv_cmd))
-                proc = subprocess.Popen(
-                    mpv_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-                )
-                logging.debug("mpv process started from cache, pid=%s", proc.pid)
-                logging.info("Playing video from cache: %s", filepath)
-                return proc
-            except Exception as e:
-                logging.error("Failed to start mpv from cache: %s", e)
-                return None
+        mpv_cmd = [c for c in mpv_cmd if c is not None]
+        logging.debug("mpv cmd: %s", " ".join(mpv_cmd))
+
+        try:
+            proc = subprocess.Popen(
+                mpv_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+            logging.debug("mpv process started, pid=%s", proc.pid)
+            if Path(play_path).exists():
+                logging.info("Playing video from cache: %s", play_path)
+            else:
+                logging.info("Playing video via mpv: %s", play_path)
+            return proc
+        except Exception as e:
+            logging.error("Failed to start mpv: %s", e)
+            return None
         else:
             # Pipe mode: Let mpv handle everything - pass URL directly
             cookies = cfg.get("CookiesFile", COOKIES_FILE)
@@ -944,13 +968,23 @@ def interactive_play(
         except Exception:
             pass
         while retry_count < 3:
-            # try to get duration from metadata
+            # try to get duration from metadata and try cache first
             info = get_video_info(webpage_url)
             duration = None
             if info:
                 duration = info.get("duration")
+            # Determine if we should use cache or direct streaming
+            play_url = webpage_url
+            if cfg.get("PlaybackMethod") == "cache":
+                filepath = download_to_cache(webpage_url, cfg, video_mode=video_mode)
+                if not filepath:
+                    print("  Failed to download to cache.")
+                    logging.info("Cache download failed for %s", title)
+                    idx += 1
+                    break
+                play_url = str(filepath)  # Use the cached file path
             player = play_stream(
-                webpage_url, silent=not cfg.get("Debug", False), video_mode=video_mode
+                play_url, silent=not cfg.get("Debug", False), video_mode=video_mode
             )
             if player is None:
                 print("  Failed to start player.")
@@ -1139,8 +1173,17 @@ def handle_input(raw: str, cfg: dict, video_mode=False):
                 # ensure we have metadata for duration display
                 info = info if "info" in locals() else get_video_info(raw)
                 duration = info.get("duration") if info else None
+                # Determine if we should use cache or direct streaming
+                play_url = raw
+                if cfg.get("PlaybackMethod") == "cache":
+                    filepath = download_to_cache(raw, cfg, video_mode=video_mode)
+                    if not filepath:
+                        print("  Failed to download to cache.")
+                        logging.info("Cache download failed for single video: %s", raw)
+                        return
+                    play_url = str(filepath)  # Use the cached file path
                 player = play_stream(
-                    raw, silent=not cfg.get("Debug", False), video_mode=video_mode
+                    play_url, silent=not cfg.get("Debug", False), video_mode=video_mode
                 )
                 print("  Controls: [r]eplay, [q]uit")
                 if player is None:
