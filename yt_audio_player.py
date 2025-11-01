@@ -795,6 +795,60 @@ def play_stream(url: str, silent=True, video_mode=False) -> subprocess.Popen:
         video_mode,
     )
 
+    # If the caller already provided a local cached file path, play it directly
+    # instead of treating it as a URL (which would cause yt-dlp to error).
+    try:
+        p = Path(url)
+    except Exception:
+        p = None
+    if p and p.exists():
+        local_path = str(p)
+        logging.debug(
+            "play_stream: detected local file path, playing directly: %s", local_path
+        )
+        if video_mode:
+            # Play local video file with mpv
+            mpv_cmd = [
+                "mpv",
+                local_path,
+                "--force-window",
+                "--no-terminal" if silent else None,
+                "--msg-level=all=no" if silent else None,
+            ]
+            mpv_cmd = [c for c in mpv_cmd if c is not None]
+            logging.debug("mpv cmd (local file): %s", " ".join(mpv_cmd))
+            try:
+                proc = subprocess.Popen(
+                    mpv_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                )
+                logging.info("Playing local video file: %s", local_path)
+                return proc
+            except Exception as e:
+                logging.error(
+                    "Failed to start mpv for local file %s: %s", local_path, e
+                )
+                return None
+        else:
+            # Play local audio file with ffplay
+            ffplay_cmd = [
+                "ffplay",
+                "-nodisp",
+                "-autoexit",
+                "-loglevel",
+                "info" if not silent else "quiet",
+                local_path,
+            ]
+            logging.debug("ffplay cmd (local file): %s", " ".join(ffplay_cmd))
+            try:
+                proc = subprocess.Popen(ffplay_cmd, stdin=subprocess.DEVNULL)
+                logging.info("Playing local audio file: %s", local_path)
+                return proc
+            except Exception as e:
+                logging.error(
+                    "Failed to start ffplay for local file %s: %s", local_path, e
+                )
+                return None
+
     if video_mode:
         # Get the correct path/url to play
         play_path = url
