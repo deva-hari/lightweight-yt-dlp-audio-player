@@ -2,7 +2,7 @@
   "SearchLimit": 10,
   "Debug": false,
   "CookiesFile": "cookies.txt",
-  "PlaybackMethod": "cache",
+  "PlaybackMethod": "pipe",
   "CacheDir": "cache",
   "CacheMaxFiles": 150,
   "CacheRetryCount": 3,
