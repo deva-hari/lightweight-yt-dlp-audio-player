@@ -17,7 +17,7 @@ The player is highly configurable and offers a rich set of features, including:
 *   **Interactive Controls:** Control playback with simple keyboard commands (next, replay, quit).
 *   **History:** Keeps a log of played tracks, which can be viewed and exported.
 *   **Offline Playback:** Play all files from the local cache in a shuffled order.
-*   **Dependency Management:** The script can automatically check for and install required dependencies (`yt-dlp`, `ffmpeg`, `mpv`) using `winget` (on Windows) or `apt` and `pip` (on Linux).
+*   **Playlist From File:** Play from a local file with a list of URLs.
 
 The main script is `yt_audio_player.py`, which is well-structured and uses the `argparse` library for command-line arguments, `logging` for detailed logs, and a `config.json` file for configuration. An alternative, older version of the script exists at `alt/yt_audio_player_alt.py`.
 
@@ -83,8 +83,16 @@ python yt_audio_player.py "https://www.youtube.com/playlist?list=PLrAXtmErZgOeiK
 python yt_audio_player.py --video "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
 ```
 
-**Offline Playback:**
+**Playlist from File:**
 
+To play from a local playlist file:
+
+```bash
+python yt_audio_player.py --list
+```
+
+
+**Offline Playback:**
 To play from the cache:
 
 ```bash

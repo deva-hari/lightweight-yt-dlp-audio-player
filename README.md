@@ -72,6 +72,19 @@ python yt_audio_player.py --video "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
 python yt_audio_player.py "https://www.youtube.com/playlist?list=PLrAXtmErZgOeiKm4sgNOknGvNjby9efdf"
 ```
 
+### Playlist Files
+
+The `--list` flag allows you to play from local playlist files. These are simple text files with one YouTube URL per line. You can create these files in the `playlists` directory.
+
+To use this feature, run the script with the `--list` flag:
+
+```sh
+python yt_audio_player.py --list
+```
+
+The script will then display a list of available playlist files and prompt you to choose one.
+
+
 ## 🚀 Power-User Guide
 
 ### Command-Line Flags
@@ -81,6 +94,7 @@ python yt_audio_player.py "https://www.youtube.com/playlist?list=PLrAXtmErZgOeiK
 - `--force-cache-refresh`: Forces re-download of a track, even if it exists in the cache.
 - `--update-yt-dlp`: Checks for and attempts to install the latest version of `yt-dlp`.
 - `--offline`: Immediately starts playing all tracks from the local cache in shuffle mode.
+- `--list`: Show and play from playlist files stored in `./playlists` (one URL per line).
 
 ### Interactive Commands
 
