@@ -1363,6 +1363,189 @@ def playlist_to_entries(playlist_url: str) -> List[dict]:
             return []
 
 
+def list_playlist_files(folder: str = "playlists") -> List[Path]:
+    """Return a list of Path objects for playlist files in the given folder.
+    Creates the folder if it does not exist.
+    """
+    p = Path(folder)
+    p.mkdir(parents=True, exist_ok=True)
+    files = [
+        f
+        for f in sorted(p.iterdir())
+        if f.is_file() and f.suffix.lower() in (".txt", ".list", ".m3u")
+    ]
+    logging.debug("Found %d playlist files in %s", len(files), folder)
+    return files
+
+
+def play_from_list_file(path: Path, cfg: dict, video_mode: bool = False):
+    """Play URLs listed (one per line) in the given file.
+
+    Each line may be a single video URL or a playlist URL. For playlist URLs,
+    expand entries and play them sequentially. After a playlist finishes, move
+    to the next line in the file. Respects global PlaybackMethod and video_mode.
+    """
+    logging.info("Playing list file: %s", path)
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = [l.strip() for l in f.readlines()]
+    except Exception as e:
+        logging.error("Failed to read list file %s: %s", path, e)
+        print("Failed to read list file:", e)
+        return
+
+    entries = [l for l in lines if l and not l.startswith("#")]
+    if not entries:
+        print("No URLs found in", path)
+        return
+
+    for i, raw in enumerate(entries, 1):
+        print(f"\n== List item {i}/{len(entries)}: {raw}")
+        logging.info(
+            "List file %s: playing entry %d/%d: %s", path, i, len(entries), raw
+        )
+        # If it's a playlist URL, expand and play entries
+        if is_url(raw) and is_playlist(raw):
+            print("Playlist URL detected – fetching all entries …")
+            logging.info("Playlist URL detected in list file: %s", raw)
+            pl_entries = playlist_to_entries(raw)
+            if pl_entries:
+                interactive_play(
+                    pl_entries, cfg, playlist_url=raw, video_mode=video_mode
+                )
+            else:
+                print("Empty or unavailable playlist.")
+            # after playlist finished, continue to next list file line
+            continue
+
+        # If it's a URL (single video), play it similarly to interactive single play
+        if is_url(raw):
+            title = None
+            try:
+                info = get_video_info(raw)
+                title = info.get("title") if info else None
+            except Exception:
+                info = None
+
+            print(f"Now playing: {title or raw}")
+            # record history
+            try:
+                append_history(
+                    {
+                        "type": "list_item",
+                        "playlist_url": str(path),
+                        "track_url": raw,
+                        "title": title,
+                        "timestamp": int(time.time()),
+                    }
+                )
+            except Exception:
+                pass
+
+            # Use cache if configured
+            play_target = raw
+            if cfg.get("PlaybackMethod") == "cache":
+                filepath = download_to_cache(raw, cfg, video_mode=video_mode)
+                if not filepath:
+                    print("  Failed to download to cache.")
+                    logging.info("Cache download failed for %s", raw)
+                    continue
+                play_target = str(filepath)
+
+            # Start player and allow user controls similar to interactive_play
+            player = play_stream(
+                play_target, silent=not cfg.get("Debug", False), video_mode=video_mode
+            )
+            if player is None:
+                print("  Failed to start player.")
+                logging.info("Player failed to start for %s", raw)
+                continue
+
+            user_action = None
+            start_ts = time.time()
+            try:
+                while player.poll() is None:
+                    if platform.system() == "Windows":
+                        import msvcrt
+
+                        if msvcrt.kbhit():
+                            ch = msvcrt.getch().decode().lower()
+                            logging.debug("User pressed key: %s", ch)
+                            if ch == "n":
+                                logging.debug("User requested next item in list.")
+                                player.terminate()
+                                user_action = "next"
+                                break
+                            elif ch == "r":
+                                logging.debug("User requested replay.")
+                                player.terminate()
+                                user_action = "replay"
+                                break
+                            elif ch == "q":
+                                logging.debug("User requested quit.")
+                                player.terminate()
+                                return
+                    else:
+                        import select
+
+                        if select.select([sys.stdin], [], [], 0)[0]:
+                            ch = sys.stdin.read(1).lower()
+                            logging.debug("User pressed key: %s", ch)
+                            if ch == "n":
+                                logging.debug("User requested next item in list.")
+                                player.terminate()
+                                user_action = "next"
+                                break
+                            elif ch == "r":
+                                logging.debug("User requested replay.")
+                                player.terminate()
+                                user_action = "replay"
+                                break
+                            elif ch == "q":
+                                logging.debug("User requested quit.")
+                                player.terminate()
+                                return
+
+                    # show elapsed in audio mode
+                    if not video_mode:
+                        elapsed = int(time.time() - start_ts)
+                        if info and info.get("duration"):
+                            total = int(info.get("duration"))
+                            sys.stdout.write(f"\rElapsed: {elapsed}s / {total}s ")
+                        else:
+                            sys.stdout.write(f"\rElapsed: {elapsed}s")
+                        sys.stdout.flush()
+                    time.sleep(0.1)
+            except KeyboardInterrupt:
+                logging.debug("KeyboardInterrupt: terminating player.")
+                player.terminate()
+                return
+
+            # Clear elapsed line in audio mode
+            if not video_mode:
+                try:
+                    sys.stdout.write("\r" + " " * 60 + "\r")
+                except Exception:
+                    pass
+
+            # Replay handling
+            if user_action == "replay":
+                # replay same item
+                try:
+                    continue
+                except Exception:
+                    pass
+            # If next was requested, continue to next URL in file
+            if user_action == "next":
+                continue
+
+            # natural end: continue to next file entry
+            continue
+        else:
+            logging.debug("Skipping non-URL line in list file: %s", raw)
+            continue
+
+
 # ------------------------------------------------------------------
 # Cached playback helpers (start, send key, pause/resume)
 # ------------------------------------------------------------------
@@ -1574,6 +1757,11 @@ def main():
         action="store_true",
         help="Enable video playback mode using mpv player",
     )
+    parser.add_argument(
+        "--list",
+        action="store_true",
+        help="Show and play from playlist files stored in ./playlists (one URL per line)",
+    )
     args = parser.parse_args()
 
     logging.debug("main() called")
@@ -1680,6 +1868,34 @@ def main():
             offline_play(cfg)
         except Exception as e:
             logging.error("Offline playback failed: %s", e)
+        return
+
+    # If --list flag passed, show playlist files and let user pick one to play
+    if getattr(args, "list", False):
+        files = list_playlist_files()
+        if not files:
+            print(
+                "No playlist files found in ./playlists. Add .txt files with one URL per line."
+            )
+            return
+        print("Available playlist files:")
+        for i, f in enumerate(files, 1):
+            print(f"[{i}] {f.name}")
+        try:
+            sel = input("Select file by number (or 0 to cancel): ").strip()
+            if not sel or sel == "0":
+                print("Cancelled.")
+                return
+            idx = int(sel) - 1
+            if not (0 <= idx < len(files)):
+                print("Invalid selection.")
+                return
+        except Exception:
+            print("Invalid selection.")
+            return
+        chosen = files[idx]
+        logging.info("User selected playlist file: %s", chosen)
+        play_from_list_file(chosen, cfg, video_mode=args.video)
         return
 
     if args.input:
