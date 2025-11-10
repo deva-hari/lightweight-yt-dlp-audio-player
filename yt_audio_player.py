@@ -1378,12 +1378,24 @@ def list_playlist_files(folder: str = "playlists") -> List[Path]:
     return files
 
 
-def play_from_list_file(path: Path, cfg: dict, video_mode: bool = False):
+def play_from_list_file(
+    path: Path,
+    cfg: dict,
+    video_mode: bool = False,
+    shuffle: bool = False,
+    shuffle_all: bool = False,
+    auto_mode: bool = False,
+):
     """Play URLs listed (one per line) in the given file.
 
     Each line may be a single video URL or a playlist URL. For playlist URLs,
     expand entries and play them sequentially. After a playlist finishes, move
     to the next line in the file. Respects global PlaybackMethod and video_mode.
+
+    Args:
+      shuffle: Shuffle top-level lines only
+      shuffle_all: Flatten all entries (expand playlists) and shuffle the result
+      auto_mode: Auto-advance without user prompts (no n/r/q controls)
     """
     logging.info("Playing list file: %s", path)
     try:
@@ -1398,6 +1410,24 @@ def play_from_list_file(path: Path, cfg: dict, video_mode: bool = False):
     if not entries:
         print("No URLs found in", path)
         return
+
+    # If shuffle_all, flatten all entries (expand playlists) and shuffle the result
+    if shuffle_all:
+        logging.info("Expanding all playlists for shuffle_all mode")
+        flattened = []
+        for raw in entries:
+            if is_url(raw) and is_playlist(raw):
+                pl_entries = playlist_to_entries(raw)
+                for pe in pl_entries or []:
+                    flattened.append(pe.get("webpage_url") or pe.get("url"))
+            elif is_url(raw):
+                flattened.append(raw)
+        entries = flattened
+        random.shuffle(entries)
+        logging.info("After shuffle_all: %d total entries", len(entries))
+    # Optionally shuffle the top-level entries from the file (only if shuffle_all not used)
+    elif shuffle:
+        random.shuffle(entries)
 
     for i, raw in enumerate(entries, 1):
         print(f"\n== List item {i}/{len(entries)}: {raw}")
@@ -1465,46 +1495,48 @@ def play_from_list_file(path: Path, cfg: dict, video_mode: bool = False):
             start_ts = time.time()
             try:
                 while player.poll() is None:
-                    if platform.system() == "Windows":
-                        import msvcrt
+                    # In auto_mode, skip all user input checks
+                    if not auto_mode:
+                        if platform.system() == "Windows":
+                            import msvcrt
 
-                        if msvcrt.kbhit():
-                            ch = msvcrt.getch().decode().lower()
-                            logging.debug("User pressed key: %s", ch)
-                            if ch == "n":
-                                logging.debug("User requested next item in list.")
-                                player.terminate()
-                                user_action = "next"
-                                break
-                            elif ch == "r":
-                                logging.debug("User requested replay.")
-                                player.terminate()
-                                user_action = "replay"
-                                break
-                            elif ch == "q":
-                                logging.debug("User requested quit.")
-                                player.terminate()
-                                return
-                    else:
-                        import select
+                            if msvcrt.kbhit():
+                                ch = msvcrt.getch().decode().lower()
+                                logging.debug("User pressed key: %s", ch)
+                                if ch == "n":
+                                    logging.debug("User requested next item in list.")
+                                    player.terminate()
+                                    user_action = "next"
+                                    break
+                                elif ch == "r":
+                                    logging.debug("User requested replay.")
+                                    player.terminate()
+                                    user_action = "replay"
+                                    break
+                                elif ch == "q":
+                                    logging.debug("User requested quit.")
+                                    player.terminate()
+                                    return
+                        else:
+                            import select
 
-                        if select.select([sys.stdin], [], [], 0)[0]:
-                            ch = sys.stdin.read(1).lower()
-                            logging.debug("User pressed key: %s", ch)
-                            if ch == "n":
-                                logging.debug("User requested next item in list.")
-                                player.terminate()
-                                user_action = "next"
-                                break
-                            elif ch == "r":
-                                logging.debug("User requested replay.")
-                                player.terminate()
-                                user_action = "replay"
-                                break
-                            elif ch == "q":
-                                logging.debug("User requested quit.")
-                                player.terminate()
-                                return
+                            if select.select([sys.stdin], [], [], 0)[0]:
+                                ch = sys.stdin.read(1).lower()
+                                logging.debug("User pressed key: %s", ch)
+                                if ch == "n":
+                                    logging.debug("User requested next item in list.")
+                                    player.terminate()
+                                    user_action = "next"
+                                    break
+                                elif ch == "r":
+                                    logging.debug("User requested replay.")
+                                    player.terminate()
+                                    user_action = "replay"
+                                    break
+                                elif ch == "q":
+                                    logging.debug("User requested quit.")
+                                    player.terminate()
+                                    return
 
                     # show elapsed in audio mode
                     if not video_mode:
@@ -1527,6 +1559,11 @@ def play_from_list_file(path: Path, cfg: dict, video_mode: bool = False):
                     sys.stdout.write("\r" + " " * 60 + "\r")
                 except Exception:
                     pass
+
+            # In auto_mode, skip all post-play prompts and just continue
+            if auto_mode:
+                logging.info("auto_mode: continuing to next item")
+                continue
 
             # Replay handling
             if user_action == "replay":
@@ -1762,6 +1799,21 @@ def main():
         action="store_true",
         help="Show and play from playlist files stored in ./playlists (one URL per line)",
     )
+    parser.add_argument(
+        "--shuffle",
+        action="store_true",
+        help="Shuffle the order of URLs when using --list (shuffles top-level file lines only)",
+    )
+    parser.add_argument(
+        "--shuffle-all",
+        action="store_true",
+        help="Shuffle all tracks when using --list (expands playlists and shuffles all resulting entries)",
+    )
+    parser.add_argument(
+        "--auto",
+        action="store_true",
+        help="Auto-advance through --list without user prompts (non-interactive mode)",
+    )
     args = parser.parse_args()
 
     logging.debug("main() called")
@@ -1895,7 +1947,14 @@ def main():
             return
         chosen = files[idx]
         logging.info("User selected playlist file: %s", chosen)
-        play_from_list_file(chosen, cfg, video_mode=args.video)
+        play_from_list_file(
+            chosen,
+            cfg,
+            video_mode=args.video,
+            shuffle=args.shuffle,
+            shuffle_all=args.shuffle_all,
+            auto_mode=args.auto,
+        )
         return
 
     if args.input:

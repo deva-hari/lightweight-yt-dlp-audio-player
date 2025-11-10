@@ -72,17 +72,68 @@ python yt_audio_player.py --video "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
 python yt_audio_player.py "https://www.youtube.com/playlist?list=PLrAXtmErZgOeiKm4sgNOknGvNjby9efdf"
 ```
 
-### Playlist Files
+### Playlist Files (`--list`)
 
-The `--list` flag allows you to play from local playlist files. These are simple text files with one YouTube URL per line. You can create these files in the `playlists` directory.
+The `--list` flag allows you to play from local playlist files. These are simple text files with one YouTube URL per line (comments starting with `#` are ignored). You can create these files in the `playlists` directory.
 
-To use this feature, run the script with the `--list` flag:
+**How to use:**
+
+1. Create a `playlists` folder in the same directory as the script.
+2. Add `.txt` or `.m3u` files with one URL per line:
+
+   ```txt
+   # My Favorite Songs
+   https://www.youtube.com/watch?v=dQw4w9WgXcQ
+   https://www.youtube.com/playlist?list=PLrAXtmErZgOeiKm4sgNOknGvNjby9efdf
+   https://youtu.be/jNQXAC9IVRw
+   ```
+
+3. Run the script:
+
+   ```sh
+   python yt_audio_player.py --list
+   ```
+
+4. Select a file from the menu.
+
+**Playlist Features:**
+
+- **Sequential playback:** URLs are played in order (or shuffled if you use `--shuffle` or `--shuffle-all`).
+- **Playlist expansion:** If a line contains a playlist URL, it expands into all its videos and plays them in sequence.
+- **User controls (unless `--auto` is used):** During playback, press `n` for next, `r` to replay, `q` to quit.
+- **Respects cache/pipe mode:** Uses your configured `PlaybackMethod` from `config.json`.
+
+**Advanced shuffle options:**
+
+- `--shuffle`: Shuffles only the top-level file lines (preserves playlist order within each expanded playlist).
+
+  ```sh
+  python yt_audio_player.py --list --shuffle
+  ```
+
+- `--shuffle-all`: Expands ALL playlists first, then shuffles the entire flattened list of videos.
+
+  ```sh
+  python yt_audio_player.py --list --shuffle-all
+  ```
+
+**Auto-advance mode:**
+
+- `--auto`: Non-interactive mode—auto-advances through all tracks without prompting for input. Perfect for unattended playback or scripting.
+
+  ```sh
+  python yt_audio_player.py --list --auto
+  ```
+
+**Combined examples:**
 
 ```sh
-python yt_audio_player.py --list
-```
+# Shuffle all videos across all playlists, then auto-advance
+python yt_audio_player.py --list --shuffle-all --auto
 
-The script will then display a list of available playlist files and prompt you to choose one.
+# Video mode with shuffled playlists
+python yt_audio_player.py --list --shuffle-all --video
+```
 
 
 ## 🚀 Power-User Guide
@@ -95,6 +146,9 @@ The script will then display a list of available playlist files and prompt you t
 - `--update-yt-dlp`: Checks for and attempts to install the latest version of `yt-dlp`.
 - `--offline`: Immediately starts playing all tracks from the local cache in shuffle mode.
 - `--list`: Show and play from playlist files stored in `./playlists` (one URL per line).
+- `--shuffle`: Shuffle the top-level lines of a playlist file (only works with `--list`).
+- `--shuffle-all`: Expand all playlists and shuffle the entire flattened list of videos (only works with `--list`).
+- `--auto`: Non-interactive auto-advance mode; skips all user prompts (only works with `--list`).
 
 ### Interactive Commands
 
@@ -154,4 +208,4 @@ Pull requests, issues, and feature ideas are welcome! This project is designed t
 
 *Disclaimer: All exaggerations are for fun! This project is real, but the hype is just to make you smile. Use responsibly, and don’t actually try to run it on a toaster. Or do, and let us know what happens!*
 
-*Made with ❤️ and 🤖 for music lovers, productivity nerds, and anyone who hates bloatware.*
+*Made with ❤️ and 🤖 for music lovers, productivity nerds, and anyone who hates bloatware.
