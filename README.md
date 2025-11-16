@@ -23,18 +23,23 @@ Are you a gamer who wants to blast your favorite YouTube playlist while fragging
 - **Smart Configuration:** Tweaks are stored in a simple `config.json`. The script creates it with sensible defaults on first run.
 - **Cookies Support:** Just drop your `cookies.txt` in the folder to play age-restricted or region-locked content.
 - **Self-Updating & Dependency Management:** The script checks for new `yt-dlp` versions and can even auto-install `ffmpeg` and `mpv` for you!
+- **Windows Sleep Prevention:** On Windows, the script prevents your PC from sleeping while playing media. Perfect for gaming sessions or long listening sessions!
+- **Crash Recovery:** If the script exits ungracefully, it automatically detects and cleans up the previous state on next run, ensuring reliable resumption.
+- **Graceful Shutdown:** Signal handling for `Ctrl+C` and termination signals ensures proper cleanup before exit—no stray processes left behind.
 
 ## 🛠️ Zero-Fuss Installation
 
 This script is smart. If you're missing dependencies, it will try to install them for you!
 
-1.  **Install Python 3.x** if you don't have it.
-2.  **Run the script:**
+1. **Install Python 3.x** if you don't have it.
+2. **Run the script:**
+
     ```sh
     python yt_audio_player.py
     ```
-3.  The script will check for `yt-dlp`, `ffmpeg`, and `mpv`. If they are missing, it will attempt to install them using `winget` (on Windows) or `apt`/`pip` (on Linux).
-4.  If the automatic install fails, you may need to install them manually:
+
+3. The script will check for `yt-dlp`, `ffmpeg`, and `mpv`. If they are missing, it will attempt to install them using `winget` (on Windows) or `apt`/`pip` (on Linux).
+4. If the automatic install fails, you may need to install them manually:
     - **yt-dlp:** `pip install -U yt-dlp`
     - **FFmpeg:** Download from [ffmpeg.org](https://ffmpeg.org/download.html) and add to your system's PATH.
     - **mpv:** Download from [mpv.io](https://mpv.io/installation/) and add to your system's PATH.
@@ -46,12 +51,14 @@ This script is smart. If you're missing dependencies, it will try to install the
 For the full experience, run the script without arguments. You can choose between audio or video mode.
 
 **Audio Mode:**
+
 ```sh
 python yt_audio_player.py
 YouTube> lofi hip hop radio
 ```
 
 **Video Mode:**
+
 ```sh
 python yt_audio_player.py --video
 YouTube(video)> how to cook a perfect steak
@@ -135,8 +142,27 @@ python yt_audio_player.py --list --shuffle-all --auto
 python yt_audio_player.py --list --shuffle-all --video
 ```
 
-
 ## 🚀 Power-User Guide
+
+### Reliability & System Integration
+
+**Windows Sleep Prevention:**
+
+- On Windows systems, the script automatically prevents your PC from entering sleep mode while media is playing.
+- This is especially useful during long gaming sessions or overnight listening sessions.
+- The script gracefully restores sleep settings when it exits.
+
+**Crash Detection & Recovery:**
+
+- If the script exits unexpectedly (power loss, crash, force-kill), it stores the active playback state in `logs/player_state.json`.
+- On the next run, the script automatically detects this state, cleans up any lingering player processes, and resumes normally.
+- This ensures no stray `ffplay` or `mpv` processes are left behind.
+
+**Graceful Shutdown:**
+
+- The script handles `Ctrl+C` and system termination signals (`SIGTERM`) properly.
+- All player processes are terminated cleanly, state is cleared, and system settings (like sleep mode) are restored.
+- Uses `atexit` hooks to ensure cleanup happens even in unexpected exit scenarios.
 
 ### Command-Line Flags
 

@@ -19,6 +19,8 @@ import urllib.request
 import shutil
 import random
 import signal
+import atexit
+import traceback
 
 
 def _is_version_greater(v_new: str, v_old: str) -> bool:
@@ -52,6 +54,129 @@ LOG_FILE = "logs/player.log"
 COOKIES_FILE = "cookies.txt"
 HISTORY_FILE = "logs/history.json"
 HISTORY_INDEX_FILE = "logs/history_index.json"
+STATE_FILE = "logs/player_state.json"  # Track script state for crash recovery
+
+
+# ------------------------------------------------------------------
+# Windows Sleep Prevention & State Management
+# ------------------------------------------------------------------
+_SLEEP_LOCK_ACTIVE = False
+
+
+def prevent_sleep_windows():
+    """Prevent Windows from going to sleep while script runs."""
+    global _SLEEP_LOCK_ACTIVE
+    if is_windows():
+        try:
+            import ctypes
+
+            # ES_CONTINUOUS (0x80000000) | ES_SYSTEM_REQUIRED (0x00000001)
+            ctypes.windll.kernel32.SetThreadExecutionState(0x80000001)
+            _SLEEP_LOCK_ACTIVE = True
+            logging.debug("Windows sleep prevention activated")
+        except Exception as e:
+            logging.warning("Could not activate sleep prevention: %s", e)
+    else:
+        logging.debug("Not Windows; sleep prevention skipped")
+
+
+def allow_sleep_windows():
+    """Allow Windows to sleep again."""
+    global _SLEEP_LOCK_ACTIVE
+    if is_windows() and _SLEEP_LOCK_ACTIVE:
+        try:
+            import ctypes
+
+            # ES_CONTINUOUS (0x80000000)
+            ctypes.windll.kernel32.SetThreadExecutionState(0x80000000)
+            _SLEEP_LOCK_ACTIVE = False
+            logging.debug("Windows sleep prevention deactivated")
+        except Exception as e:
+            logging.warning("Could not deactivate sleep prevention: %s", e)
+
+
+def write_state(state: dict):
+    """Write current script state for crash recovery."""
+    try:
+        Path("logs").mkdir(exist_ok=True)
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+        logging.debug("State written: %s", state)
+    except Exception as e:
+        logging.debug("Failed to write state: %s", e)
+
+
+def read_state() -> dict:
+    """Read script state for crash recovery."""
+    try:
+        if Path(STATE_FILE).exists():
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception as e:
+        logging.debug("Failed to read state: %s", e)
+    return {}
+
+
+def clear_state():
+    """Clear script state after graceful exit."""
+    try:
+        if Path(STATE_FILE).exists():
+            Path(STATE_FILE).unlink()
+        logging.debug("State cleared after graceful exit")
+    except Exception as e:
+        logging.debug("Failed to clear state: %s", e)
+
+
+def cleanup_crashed_state():
+    """Detect and clean up after non-graceful shutdown."""
+    state = read_state()
+    if state:
+        logging.warning("Detected incomplete state from previous crash: %s", state)
+        logging.warning("Cleaning up...")
+        # Terminate any lingering player processes
+        if "player_pid" in state:
+            try:
+                pid = state["player_pid"]
+                if is_windows():
+                    os.system(f"taskkill /PID {pid} /F 2>nul")
+                else:
+                    os.kill(pid, signal.SIGKILL)
+                logging.info("Terminated lingering process (pid=%s)", pid)
+            except Exception as e:
+                logging.debug("Could not terminate lingering process: %s", e)
+        clear_state()
+        print("[INFO] Cleaned up from previous crash. Resuming normally.")
+
+
+def cleanup_on_exit():
+    """Graceful cleanup when script exits (normal or via signal)."""
+    logging.info("Cleaning up and exiting gracefully...")
+    clear_state()
+    allow_sleep_windows()
+    logging.info("Exit cleanup complete")
+
+
+# Register cleanup on normal exit and signals
+atexit.register(cleanup_on_exit)
+signal.signal(signal.SIGTERM, lambda s, f: (cleanup_on_exit(), sys.exit(0)))
+signal.signal(signal.SIGINT, lambda s, f: (cleanup_on_exit(), sys.exit(0)))
+
+
+def track_player_state(proc: subprocess.Popen, url: str = "", title: str = ""):
+    """Track active player process for crash recovery."""
+    if proc and hasattr(proc, "pid"):
+        state = {
+            "player_pid": proc.pid,
+            "url": url,
+            "title": title,
+            "timestamp": int(time.time()),
+        }
+        write_state(state)
+
+
+def untrack_player_state():
+    """Clear player state when track ends gracefully."""
+    clear_state()
 
 
 # ------------------------------------------------------------------
@@ -821,6 +946,7 @@ def play_stream(url: str, silent=True, video_mode=False) -> subprocess.Popen:
                 proc = subprocess.Popen(
                     mpv_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
                 )
+                track_player_state(proc, url, "local_video")
                 logging.info("Playing local video file: %s", local_path)
                 return proc
             except Exception as e:
@@ -841,6 +967,7 @@ def play_stream(url: str, silent=True, video_mode=False) -> subprocess.Popen:
             logging.debug("ffplay cmd (local file): %s", " ".join(ffplay_cmd))
             try:
                 proc = subprocess.Popen(ffplay_cmd, stdin=subprocess.DEVNULL)
+                track_player_state(proc, url, "local_audio")
                 logging.info("Playing local audio file: %s", local_path)
                 return proc
             except Exception as e:
@@ -1107,6 +1234,8 @@ def interactive_play(
                 player.terminate()
                 return
             exit_code = player.wait()
+            # Clear player state after graceful exit
+            untrack_player_state()
             # clear elapsed line in audio mode
             if not video_mode:
                 try:
@@ -1825,6 +1954,12 @@ def main():
     logging.debug("Debug mode: %s", cfg["Debug"])
     init_logger(cfg["Debug"])
     logging.info("Player starting. Debug=%s", cfg["Debug"])
+
+    # Check for and clean up any state from previous crash
+    cleanup_crashed_state()
+
+    # Prevent Windows from going to sleep during playback
+    prevent_sleep_windows()
 
     # Check for mpv if video mode enabled
     if args.video:
