@@ -344,12 +344,33 @@ def ensure_dependencies(check_mpv=False):
 # yt-dlp update helpers
 # ------------------------------------------------------------------
 def _get_installed_yt_dlp_version() -> Optional[str]:
+    # First, try to get version from imported module
     try:
         import yt_dlp as _yt
 
-        return getattr(_yt, "__version__", None)
+        version = getattr(_yt, "__version__", None)
+        if version:
+            return version
     except Exception:
-        return None
+        pass
+
+    # Fallback: try running yt-dlp --version command
+    try:
+        result = subprocess.run(
+            ["yt-dlp", "--version"], capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            # Parse version from output like "2024.12.09"
+            version_str = result.stdout.strip()
+            if version_str:
+                # Extract version number (first line, remove any extra text)
+                version = version_str.split()[0] if version_str else None
+                if version:
+                    return version
+    except Exception as e:
+        logging.debug("Failed to get yt-dlp version via command: %s", e)
+
+    return None
 
 
 def _get_latest_yt_dlp_version_pypi(timeout: float = 5.0) -> Optional[str]:
